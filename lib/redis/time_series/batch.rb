@@ -2,13 +2,10 @@
 
 class Redis
   class TimeSeries
-    # +Redis::TimeSeries::Batch+ executes multiple RangeCmd objects in a single
-    # Redis pipeline, avoiding N round-trips when querying many series at once.
-    #
-    # All RangeCmd objects must share the same Redis connection pool.
-    # Only simple aggregations are supported (not monthly or yearly, which
-    # perform their own internal per-period slicing inside RangeCmd#cmd).
-    #
+    # +Redis::TimeSeries::Batch+ executes multiple RangeCmd objects in a single Redis pipeline, avoiding N round-trips when querying many series at once.
+
+    # All RangeCmd objects must share the same Redis connection pool. Only simple aggregations are supported (not daily, monthly or yearly, which perform their own internal per-period slicing inside RangeCmd#cmd).
+
     # @example Batch-fetching samples for a collection of points
     #   range_cmds = points.map { |p| p.range_cmd(start_time:, end_time:, key: :original) }
     #   results = Redis::TimeSeries::Batch.call(range_cmds)
