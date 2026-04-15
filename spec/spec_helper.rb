@@ -9,9 +9,9 @@ require 'pry'
 require 'redis'
 require 'redis-time-series'
 
-REDIS_PORT = ENV['REDIS_PORT'] || 30286
-REDIS_HOST = ENV['REDIS_HOST'] || '10.32.50.104'
-REDIS_PASSWORD = ENV['REDIS_PASSWORD'] || "TW07sKYOK12tjH"
+REDIS_PORT = ENV['REDIS_PORT']
+REDIS_HOST = ENV['REDIS_HOST']
+REDIS_PASSWORD = ENV['REDIS_PASSWORD']
 
 module RedisHelpers
   def redis
