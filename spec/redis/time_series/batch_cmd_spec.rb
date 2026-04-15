@@ -2,7 +2,7 @@
 
 require "spec_helper"
 
-RSpec.describe Redis::TimeSeries::Batch do
+RSpec.describe Redis::TimeSeries::BatchCmd do
   include RedisHelpers
 
   let(:ts1) { Redis::TimeSeries.new("batch_test_1", redis: redis) }
