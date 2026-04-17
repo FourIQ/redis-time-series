@@ -34,6 +34,12 @@ class Redis
         @command = "TS.REVRANGE"
       end
 
+      # Returns true when this command can be safely executed inside an external pipeline. Overridden here because daily/monthly/yearly aggregations open their own internal
+      # pipeline inside #cmd and cannot be safely nested inside an external one.
+      def batch_compatible?
+        !calendar_aggregation?
+      end
+
       def options
         options = []
         options << @start_time
@@ -54,12 +60,12 @@ class Redis
         queried_timestamps = []
         @timeseries.redis.with do |conn|
           result = conn.pipelined do |pipeline|
-            if @aggregation&.duration == 31556952000
-              queried_timestamps = yearly_aggregation(pipeline)
-            elsif @aggregation&.duration == 2629746000
-              queried_timestamps = monthly_aggregation(pipeline)
-            elsif @aggregation&.duration == 86400000
-              daily_aggregation(pipeline)
+            if calendar_aggregation?
+              case @aggregation.duration
+              when 31556952000 then queried_timestamps = yearly_aggregation(pipeline)
+              when 2629746000  then queried_timestamps = monthly_aggregation(pipeline)
+              when 86400000    then daily_aggregation(pipeline)
+              end
             else
               if @filter_by_ts
                 sliced_cmd_for_filter_by_ts(pipeline)
@@ -97,6 +103,12 @@ class Redis
       end
 
       private
+        # Returns true for daily/monthly/yearly aggregations that perform per-period
+        # pipelining internally and cannot be nested inside an external pipeline.
+        def calendar_aggregation?
+          [86400000, 2629746000, 31556952000].include?(@aggregation&.duration)
+        end
+
         def yearly_aggregation(pipeline)
           original_start_time = @start_time
           original_end_time = @end_time
