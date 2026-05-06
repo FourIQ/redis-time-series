@@ -2,10 +2,30 @@
 
 class Redis
   class TimeSeries
-    # The +Redis::TimeSeries::RangeCmd+ class is used to chain options for the TS.RANGE command
     class RangeCmd
       attr_reader :command, :timeseries
       attr_accessor :filter_by_ts, :filter_by_range, :filter_by_value, :count, :align, :empty
+
+      # @param range_cmds [Array<RangeCmd>]
+      # @return [Array<Samples>] one Samples object per input command, same order.
+      def self.batch(range_cmds)
+        return [] if range_cmds.empty?
+
+        results = Array.new(range_cmds.size)
+        queries = []
+
+        raw_results = range_cmds.first.timeseries.redis.with do |conn|
+          conn.pipelined do |pipeline|
+            range_cmds.each_with_index { |rc, i| rc.enqueue_to_pipeline(pipeline).times { queries << i } }
+          end
+        end
+
+        grouped = Hash.new { |h, k| h[k] = [] }
+        raw_results.each_with_index { |row, j| grouped[queries[j]] << row }
+        grouped.each { |original_idx, rows| results[original_idx] = range_cmds[original_idx].from_pipeline_results(rows) }
+
+        results
+      end
 
       def initialize(timeseries:, start_time: "-", end_time: "+")
         @timeseries = timeseries
@@ -16,11 +36,13 @@ class Redis
         @empty = true
         @latest = false
         @aggregation = nil
+        @queried_timestamps = []
       end
 
       def start_time
         Time.at(@start_time.is_a?(Numeric) ? @start_time / 1000 : @start_time)
       end
+
       def end_time
         Time.at(@end_time.is_a?(Numeric) ? @end_time / 1000 : @end_time)
       end
@@ -34,19 +56,12 @@ class Redis
         @command = "TS.REVRANGE"
       end
 
-      # Returns true when this command can be safely executed inside an external pipeline. Overridden here because daily/monthly/yearly aggregations open their own internal
-      # pipeline inside #cmd and cannot be safely nested inside an external one.
-      def batch_compatible?
-        !calendar_aggregation?
-      end
-
       def options
         options = []
         options << @start_time
         options << @end_time
         options << ["FILTER_BY_TS", @filter_by_ts] if @filter_by_ts
         options << ["FILTER_BY_VALUE", @filter_by_value] if @filter_by_value
-        # align can only be used with aggregation
         options << ["ALIGN", @align] if @aggregation
         options << ["COUNT", @count] if @count
         options << @aggregation.to_a if @aggregation
@@ -55,56 +70,66 @@ class Redis
         options
       end
 
-      def cmd
-        result = []
-        queried_timestamps = []
-        @timeseries.redis.with do |conn|
-          result = conn.pipelined do |pipeline|
-            if calendar_aggregation?
-              case @aggregation.duration
-              when 31556952000 then queried_timestamps = yearly_aggregation(pipeline)
-              when 2629746000  then queried_timestamps = monthly_aggregation(pipeline)
-              when 86400000    then daily_aggregation(pipeline)
-              end
-            else
-              if @filter_by_ts
-                sliced_cmd_for_filter_by_ts(pipeline)
-              elsif @filter_by_range
-                sliced_cmd_for_filter_by_range(pipeline)
-              else
-                @timeseries.range_cmd(self, pipeline: pipeline)
-              end
-            end
+      # Enqueues all TS.RANGE calls for this command into the given pipeline.Returns the number of pipeline slots added so RangeCmd.batch can map
+      # each raw result back to its originating command.
+      def enqueue_to_pipeline(pipeline)
+        @queried_timestamps = []
+        if calendar_aggregation?
+          case @aggregation.duration
+          when 31556952000
+            @queried_timestamps = yearly_aggregation(pipeline)
+            @queried_timestamps.size
+          when 2629746000
+            @queried_timestamps = monthly_aggregation(pipeline)
+            @queried_timestamps.size
+          when 86400000
+            daily_aggregation(pipeline)
           end
+        elsif @filter_by_ts
+          sliced_cmd_for_filter_by_ts(pipeline)
+        elsif @filter_by_range
+          sliced_cmd_for_filter_by_range(pipeline)
+        else
+          @timeseries.range_cmd(self, pipeline: pipeline)
+          1
         end
+      end
 
+      # Reassembles raw pipeline result rows into a Samples object.
+      # rows: Array of raw TS.RANGE results for this command's pipeline slots.
+      def from_pipeline_results(rows, queried_timestamps = nil)
+        queried_timestamps = queried_timestamps || @queried_timestamps || []
 
-        # redis timeseries will return an empty array if there are no results.
-        # if @empty is set we want a sample with NaN instead
-        if @empty && !queried_timestamps.empty?
-          result.map! { |row| row.flatten!(1) }
-          result.map! do |row|
+        if @empty && queried_timestamps.any?
+          rows.map! { |row| row.flatten!(1) }
+          rows.map! do |row|
             timestamp = queried_timestamps.pop
             row.blank? ? [timestamp, BigDecimal("NaN")] : row
           end
         else
-          result.flatten!(1)
+          rows.flatten!(1)
         end
 
-        # we need this because Redis Timeseries adds an extra record with a different time from the other records when transitioning from summer to winter time.
-        if @aggregation&.duration == 86400000 && !result.blank?
-          first_timestamp_time = Time.at(result.first.first / 1000).strftime("%H:%M")
-          result = result.select do |ts|
-            Time.at(ts.first / 1000).strftime("%H:%M") == first_timestamp_time
+        # Redis TimeSeries adds an extra record during DST transitions for daily aggregations.
+        if @aggregation&.duration == 86400000 && rows.present?
+          first_timestamp_time = Time.at(rows.first.first / 1000).strftime("%H:%M")
+          rows = rows.select { |ts| Time.at(ts.first / 1000).strftime("%H:%M") == first_timestamp_time }
+        end
+
+        Samples.new(rows.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
+      end
+
+      def cmd
+        raw = @timeseries.redis.with do |conn|
+          conn.pipelined do |pipeline|
+            enqueue_to_pipeline(pipeline)
           end
         end
-
-        Samples.new(result.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
+        from_pipeline_results(raw)
       end
 
       private
-        # Returns true for daily/monthly/yearly aggregations that perform per-period
-        # pipelining internally and cannot be nested inside an external pipeline.
+
         def calendar_aggregation?
           [86400000, 2629746000, 31556952000].include?(@aggregation&.duration)
         end
@@ -115,7 +140,6 @@ class Redis
           original_aggregation = @aggregation
           queried_timestamps = []
 
-          Redis::TimeSeries.new(@timeseries.key)
           current_start = Time.at(start_time).beginning_of_year
           current_end = Time.at(start_time).end_of_year - 1
           while current_end < original_end_time
@@ -146,7 +170,6 @@ class Redis
           original_aggregation = @aggregation
           queried_timestamps = []
 
-          Redis::TimeSeries.new(@timeseries.key)
           current_start = Time.at(start_time)
           current_end = Time.at(start_time).end_of_month - 1
           while current_end < original_end_time
@@ -172,9 +195,7 @@ class Redis
         end
 
         def daily_aggregation(pipeline)
-          Redis::TimeSeries.new(@timeseries.key)
-
-          # set up, make sure the while runs at least once
+          count = 0
           current_start = Time.at(start_time)
           ts_end_time = Time.at(end_time)
           current_end = end_time - 1
@@ -185,13 +206,10 @@ class Redis
             end_transition = period.end_transition
 
             if end_transition
-              # If there is a DST end transition
               day_after_dst_transition = Time.at(end_transition.timestamp_value + 1.day).beginning_of_day
               current_end = (day_after_dst_transition < ts_end_time ? Time.at(day_after_dst_transition) - 1 : ts_end_time)
-              # Move start to just after the transition for next iteration
               next_current_start = day_after_dst_transition
             else
-              # No DST: process the rest in one go and exit loop
               current_end = ts_end_time
               next_current_start = ts_end_time
             end
@@ -199,43 +217,44 @@ class Redis
             @start_time = current_start
             @end_time = current_end
 
-            if @filter_by_ts
+            count += if @filter_by_ts
               sliced_cmd_for_filter_by_ts(pipeline)
             elsif @filter_by_range
               sliced_cmd_for_filter_by_range(pipeline)
             else
               @timeseries.range_cmd(self, pipeline: pipeline)
+              1
             end
 
             current_start = next_current_start
           end
+          count
         end
 
         def sliced_cmd_for_filter_by_range(pipeline)
-          result = []
           start_time = @start_time
           end_time = @end_time
-          start_end_range = start_time..end_time
+          ranges = filter_by_range.select { |f| (start_time..end_time).cover?(f) }
           @align = start_time
-          filter_by_range.select { |f| start_end_range.cover?(f) }.each do |range|
+          ranges.each do |range|
             @start_time = range.begin
             @end_time = range.end
-            result << @timeseries.range_cmd(self, pipeline: pipeline)
+            @timeseries.range_cmd(self, pipeline: pipeline)
           end
           @start_time = start_time
           @end_time = end_time
-          result
+          ranges.size
         end
 
         def sliced_cmd_for_filter_by_ts(pipeline)
-          result = []
           all_filter_by_ts = @filter_by_ts
-          all_filter_by_ts.each_slice(128) do |filter_by_ts|
+          slices = all_filter_by_ts.each_slice(128).to_a
+          slices.each do |filter_by_ts|
             @filter_by_ts = filter_by_ts
-            result << @timeseries.range_cmd(self, pipeline: pipeline)
+            @timeseries.range_cmd(self, pipeline: pipeline)
           end
           @filter_by_ts = all_filter_by_ts
-          result
+          slices.size
         end
     end
   end
