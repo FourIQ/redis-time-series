@@ -3,8 +3,6 @@ class Redis
   class TimeSeries
     # A sample is an immutable value object that represents a single data point within a time series.
     class Sample
-      using TimeMsec
-
       # @return [Time] the sample's timestamp
       attr_reader :time
       # @return [BigDecimal] the decimal value of the sample
@@ -15,17 +13,13 @@ class Redis
       # @see TimeSeries#get
       # @see TimeSeries#range
       def initialize(timestamp, value)
-        @time = Time.from_msec(timestamp)
+        @time = Time.at(timestamp / 1000.0)
         @value = BigDecimal(value)
       end
 
       # @return [Integer] the millisecond value of the sample's timestamp
-      # @note
-      #   We're wrapping the method provided by the {TimeMsec} refinement for convenience,
-      #   otherwise it wouldn't be callable on {time} and devs would have to litter
-      #   +using TimeMsec+ or +* 1000.0+ wherever they wanted the value.
       def to_msec
-        time.ts_msec
+        (time.to_f * 1000.0).to_i
       end
 
       # @return [Hash] a hash representation of the sample

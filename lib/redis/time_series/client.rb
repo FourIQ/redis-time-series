@@ -1,6 +1,4 @@
 # frozen_string_literal: true
-using TimeMsec
-
 class Redis
   class TimeSeries
     # The client module handles connection management for individual time series, and
@@ -68,7 +66,7 @@ class Redis
       end
 
       def cmd_with_redis(redis, name, *args)
-        args = args.flatten.compact.map { |arg| arg.is_a?(Time) ? arg.ts_msec : arg.to_s }
+        args = args.flatten.compact.map { |arg| arg.is_a?(Time) ? (arg.to_f * 1000.0).to_i : arg.to_s }
         puts "DEBUG: #{name} #{args.join(' ')}" if debug
         redis.call name, args
       end
