@@ -20,5 +20,11 @@ class Redis
     # duplicate policy when creating or adding to a series.
     # @see Redis::TimeSeries::DuplicatePolicy
     class UnknownPolicyError < Error; end
+
+    # +CalculationError+ is raised when one of the +Samples#*_values!+ reducer
+    # methods is called on samples whose value is not an enumerable, typically
+    # because the samples were not produced by +Samples.merge+.
+    # @see Redis::TimeSeries::Samples
+    class CalculationError < Error; end
   end
 end

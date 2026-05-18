@@ -1,14 +1,16 @@
 # frozen_string_literal: true
 class Redis
   class TimeSeries
-    # A sample is an immutable value object that represents a single data point within a time series.
+    # A sample is a value object that represents a single data point within a time series.
+    # The +value+ is writable so that callers (e.g. {Samples}) can mutate samples when
+    # post-processing query results.
     class Sample
       using TimeMsec
 
       # @return [Time] the sample's timestamp
       attr_reader :time
       # @return [BigDecimal] the decimal value of the sample
-      attr_reader :value
+      attr_accessor :value
 
       # Samples are returned by time series query methods, there's no need to create one yourself.
       # @api private
