@@ -20,6 +20,7 @@ class Redis
         std.p
         std.s
         sum
+        twa
         var.p
         var.s
       ]

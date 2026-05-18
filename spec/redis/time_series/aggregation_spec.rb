@@ -51,6 +51,12 @@ RSpec.describe Redis::TimeSeries::Aggregation do
         expect(described_class.new(:avg, 15.minutes).duration).to eq 900000
       end
     end
+
+    context 'given the twa type' do
+      it 'accepts it as a valid aggregation' do
+        expect { described_class.new(:twa, 60000) }.not_to raise_error
+      end
+    end
   end
 
   describe '#type' do
