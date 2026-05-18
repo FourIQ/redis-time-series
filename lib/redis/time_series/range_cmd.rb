@@ -74,24 +74,34 @@ class Redis
       #   b. Read phase — once the pipeline flushes, every RangeCmd reassembles its own raw replies into a Samples object.
       #
       # Tracking slot ownership matters because a RangeCmd that fans out to many slots (calendar slicing or filter slicing) still needs its replies routed back together.
+      #
+      # Example with 3 cmds (A enqueues 1 slot, B enqueues 3, C enqueues 2):
+      #   pipeline_slot_owners = [0, 1, 1, 1, 2, 2]            index = pipeline slot, value = cmd index
+      #   raw_rows             = [rA, rB1, rB2, rB3, rC1, rC2]
+      #   rows_by_cmd_index    = { 0 => [rA], 1 => [rB1, rB2, rB3], 2 => [rC1, rC2] }
+      #
       # Runs many RangeCmds in a single round trip. Returns an array of Samples objects in the same order as the input.
       def self.batch(range_cmds)
         return [] if range_cmds.empty?
 
-        slot_owner = []
+        pipeline_slot_owners = []
         raw_rows = range_cmds.first.timeseries.redis.with do |conn|
           conn.pipelined do |pipeline|
-            range_cmds.each_with_index do |range_cmd, owner_idx|
-              range_cmd.enqueue(pipeline).times { slot_owner << owner_idx }
+            range_cmds.each_with_index do |range_cmd, cmd_index|
+              range_cmd.enqueue(pipeline).times { pipeline_slot_owners << cmd_index }
             end
           end
         end
 
-        rows_per_owner = Hash.new { |h, k| h[k] = [] }
-        raw_rows.each_with_index { |row, slot_idx| rows_per_owner[slot_owner[slot_idx]] << row }
+        # Group each raw reply under the cmd that produced it. The default block auto-creates an empty array the first time a cmd_index is seen.
+        rows_by_cmd_index = Hash.new { |hash, cmd_index| hash[cmd_index] = [] }
+        raw_rows.each_with_index do |row, slot_index|
+          cmd_index = pipeline_slot_owners[slot_index]
+          rows_by_cmd_index[cmd_index] << row
+        end
 
         results = Array.new(range_cmds.size)
-        rows_per_owner.each { |owner_idx, rows| results[owner_idx] = range_cmds[owner_idx].build_samples(rows) }
+        rows_by_cmd_index.each { |cmd_index, rows| results[cmd_index] = range_cmds[cmd_index].build_samples(rows) }
         results
       end
 
