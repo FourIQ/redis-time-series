@@ -42,21 +42,23 @@ class Redis
         @debug = !!bool
       end
 
-      # @return [Redis] the current Redis client. Defaults to +Redis.new+
+      # @return [Redis, ConnectionPool] the configured Redis client or connection pool.
+      # @raise [NotConnectedError] if no client has been configured.
       def redis
-        @redis ||= Redis.new
+        @redis || raise(NotConnectedError, 'Redis::TimeSeries.redis has not been set')
       end
 
-      # Set the default Redis client for time series objects.
+      # Set the default Redis client (or connection pool) for time series objects.
       # This may be useful if you already use a non-time-series Redis database, and want
-      # to use both at the same time.
+      # to use both at the same time, or if you want to share a connection pool across
+      # the rest of your application.
       #
       # @example
       #   # config/initializers/redis_time_series.rb
       #   Redis::TimeSeries.redis = Redis.new(url: 'redis://my-redis-server:6379/0')
       #
-      # @param client [Redis] a Redis client
-      # @return [Redis]
+      # @param client [Redis, ConnectionPool] a Redis client or a connection pool
+      # @return [Redis, ConnectionPool]
       def redis=(client)
         @redis = client
       end
@@ -70,7 +72,7 @@ class Redis
       def cmd_with_redis(redis, name, *args)
         args = args.flatten.compact.map { |arg| arg.is_a?(Time) ? arg.ts_msec : arg.to_s }
         puts "DEBUG: #{name} #{args.join(' ')}" if debug
-        redis.call name, args
+        redis.then { |c| c.call name, args }
       end
     end
   end

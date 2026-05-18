@@ -20,5 +20,9 @@ class Redis
     # duplicate policy when creating or adding to a series.
     # @see Redis::TimeSeries::DuplicatePolicy
     class UnknownPolicyError < Error; end
+
+    # +NotConnectedError+ is raised when a command is issued without first
+    # configuring a Redis client (or connection pool) on +Redis::TimeSeries.redis+.
+    class NotConnectedError < Error; end
   end
 end

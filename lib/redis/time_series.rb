@@ -86,7 +86,7 @@ class Redis
       # @return [1] if the series existed
       # @return [0] if the series did not exist
       def destroy(key)
-        redis.del key
+        redis.then { |c| c.del key }
       end
 
       # Add multiple values to multiple series.
@@ -318,7 +318,7 @@ class Redis
     # @return [1] if the series existed
     # @return [0] if the series did not exist
     def destroy
-      redis.del key
+      redis.then { |c| c.del key }
     end
 
     # Get the most recent sample for this series.
