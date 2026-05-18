@@ -13,8 +13,8 @@ class Redis
 
           private
 
-          def cmd(name, *args)
-            self.class.send :cmd_with_redis, redis, name, *args
+          def cmd(name, *args, pipeline: nil)
+            self.class.send :cmd_with_redis, redis, name, *args, pipeline: pipeline
           end
         end
       end
@@ -63,14 +63,18 @@ class Redis
 
       private
 
-      def cmd(name, *args)
-        cmd_with_redis redis, name, *args
+      def cmd(name, *args, pipeline: nil)
+        cmd_with_redis redis, name, *args, pipeline: pipeline
       end
 
-      def cmd_with_redis(redis, name, *args)
+      def cmd_with_redis(redis, name, *args, pipeline: nil)
         args = args.flatten.compact.map { |arg| arg.is_a?(Time) ? arg.ts_msec : arg.to_s }
         puts "DEBUG: #{name} #{args.join(' ')}" if debug
-        redis.call name, args
+        if pipeline
+          pipeline.call name, args
+        else
+          redis.call name, args
+        end
       end
     end
   end
