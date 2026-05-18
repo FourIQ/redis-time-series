@@ -412,6 +412,16 @@ class Redis
       range_cmd('TS.RANGE', range, count, aggregation)
     end
 
+    # Delete a range of values from the series.
+    #
+    # @param range [Range] A time range over which to delete samples.
+    # @return [Integer] the number of samples deleted
+    #
+    # @see https://oss.redislabs.com/redistimeseries/commands/#tsdel
+    def del(range)
+      cmd 'TS.DEL', key, range.begin, range.end
+    end
+
     # Get a range of values from the series, from most recent to earliest
     #
     # @param range [Range] A time range over which to query. Beginless and endless ranges

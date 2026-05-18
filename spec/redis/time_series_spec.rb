@@ -204,6 +204,12 @@ RSpec.describe Redis::TimeSeries do
     end
   end
 
+  describe 'TS.DEL' do
+    specify do
+      expect { ts.del from..to }.to issue_command "TS.DEL #{key} #{msec from} #{msec to}"
+    end
+  end
+
   describe 'TS.INCRBY' do
     specify { expect { ts.incrby 1 }.to issue_command "TS.INCRBY #{key} 1" }
 
