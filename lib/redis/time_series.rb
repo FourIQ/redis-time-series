@@ -396,7 +396,7 @@ class Redis
     alias multi_add madd
     alias add_multiple madd
 
-    # Get a range of values from the series, from earliest to most recent
+    # Get a range of values from the series, from earliest to most recent.
     #
     # @param range [Range] A time range over which to query. Beginless and endless ranges
     #   indicate oldest and most recent timestamp, respectively.
@@ -404,28 +404,24 @@ class Redis
     # @param aggregation [Array(<String, Symbol>, Integer), Aggregation]
     #   The aggregation to apply. Can be an {Aggregation} object, or an array of
     #   aggregation_type and duration +[:avg, 120000]+
+    # @param filter_by_ts [Array<Integer>] only return samples whose timestamp is in this list
+    # @param filter_by_value [Array(Numeric, Numeric)] only return samples whose value is between
+    #   +min+ and +max+ (inclusive)
     #
     # @return [Array<Sample>] an array of samples matching the range query
     #
     # @see https://oss.redislabs.com/redistimeseries/commands/#tsrangetsrevrange
-    def range(range, count: nil, aggregation: nil)
-      range_cmd('TS.RANGE', range, count, aggregation)
+    def range(range, count: nil, aggregation: nil, filter_by_ts: nil, filter_by_value: nil)
+      build_range(range, count: count, aggregation: aggregation,
+                  filter_by_ts: filter_by_ts, filter_by_value: filter_by_value).cmd
     end
 
-    # Get a range of values from the series, from most recent to earliest
+    # Get a range of values from the series, from most recent to earliest.
     #
-    # @param range [Range] A time range over which to query. Beginless and endless ranges
-    #   indicate oldest and most recent timestamp, respectively.
-    # @param count [Integer] the maximum number of results to return
-    # @param aggregation [Array(<String, Symbol>, Integer), Aggregation]
-    #   The aggregation to apply. Can be an {Aggregation} object, or an array of
-    #   aggregation_type and duration +[:avg, 120000]+
-    #
-    # @return [Array<Sample>] an array of samples matching the range query
-    #
-    # @see https://oss.redislabs.com/redistimeseries/commands/#tsrangetsrevrange
-    def revrange(range, count: nil, aggregation: nil)
-      range_cmd('TS.REVRANGE', range, count, aggregation)
+    # @see #range
+    def revrange(range, count: nil, aggregation: nil, filter_by_ts: nil, filter_by_value: nil)
+      build_range(range, count: count, aggregation: aggregation,
+                  filter_by_ts: filter_by_ts, filter_by_value: filter_by_value).revrange.cmd
     end
 
     # Set data retention time for the series using +TS.ALTER+
@@ -448,14 +444,17 @@ class Redis
 
     private
 
-    def range_cmd(cmd_name, range, count, agg)
-      cmd(cmd_name,
-          key,
-          (range.begin || '-'),
-          (range.end || '+'),
-          (['COUNT', count] if count),
-          Aggregation.parse(agg)&.to_a
-         ).map { |ts, val| Sample.new(ts, val) }
+    def build_range(range, count:, aggregation:, filter_by_ts:, filter_by_value:)
+      builder = RangeCmd.new(timeseries: self, start_time: range.begin, end_time: range.end)
+      builder.count = count
+      builder.aggregation = aggregation
+      builder.filter_by_ts = filter_by_ts
+      builder.filter_by_value = filter_by_value
+      builder
+    end
+
+    def range_cmd(builder)
+      cmd(builder.command, key, *builder.options).map { |ts, val| Sample.new(ts, val) }
     end
   end
 end
