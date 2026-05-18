@@ -19,6 +19,13 @@ RSpec.describe Redis::TimeSeries::Sample do
     it { is_expected.to eq BigDecimal(value) }
   end
 
+  describe '#value=' do
+    it 'allows the value to be replaced' do
+      sample.value = BigDecimal('4.56')
+      expect(sample.value).to eq BigDecimal('4.56')
+    end
+  end
+
   describe '#to_msec' do
     subject { sample.to_msec }
 
