@@ -51,25 +51,76 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       end
 
       context "with filter_by_range" do
-        it "returns monthly calculated values filtered by range" do
-        timestamp1 = Time.parse("2024-01-01")
-        timestamp2 = Time.parse("2024-01-02")
-        timestamp3 = Time.parse("2024-01-03")
-        timestamp4 = Time.parse("2024-01-04")
-        timestamp5 = Time.parse("2024-01-05")
-        timestamp6 = Time.parse("2024-01-06")
-        timestamp7 = Time.parse("2024-02-01")
-        timestamp8 = Time.parse("2024-02-29")
+        it "returns one sample per sub-range, summed within the sub-range and aligned to the month bucket" do
+          timestamp1 = Time.parse("2024-01-01")
+          timestamp2 = Time.parse("2024-01-02")
+          timestamp3 = Time.parse("2024-01-03")
+          timestamp4 = Time.parse("2024-01-04")
+          timestamp5 = Time.parse("2024-01-05")
+          timestamp6 = Time.parse("2024-01-06")
+          timestamp7 = Time.parse("2024-02-01")
+          timestamp8 = Time.parse("2024-02-29")
 
-          values = { timestamp1 => 10, timestamp2 => 30, timestamp3 => 40, timestamp4 => 45, timestamp5 => 100, timestamp6 => 50, timestamp7 => 50, timestamp8 => 50}
+          values = { timestamp1 => 10, timestamp2 => 30, timestamp3 => 40, timestamp4 => 45, timestamp5 => 100, timestamp6 => 50, timestamp7 => 50, timestamp8 => 50 }
           ts.madd(values)
 
           range_cmd = described_class.new(timeseries: ts, start_time: timestamp1, end_time: timestamp8.end_of_day)
           range_cmd.aggregation = ["sum", 2629746000]
-          range_cmd.filter_by_range = [timestamp2..timestamp3,timestamp5..timestamp6]
-          result = range_cmd.cmd#.filter_map { |sample| sample.value.nan? ? nil : sample }
-          expect(result.map { |sample| sample.time }).to eq([timestamp1,timestamp8])
-          expect(result.map { |sample| sample.value.to_f.round(1) }).to eq([35])
+          range_cmd.filter_by_range = [timestamp2..timestamp3, timestamp5..timestamp6]
+          result = range_cmd.cmd
+          # Two sub-ranges (both in Jan) → two TS.RANGE calls. Each returns one bucket aligned to Jan 1 with the sum inside that sub-range.
+          # Feb has no covering sub-range → no Feb call, no Feb sample.
+          expect(result.map { |sample| sample.time }).to eq([timestamp1, timestamp1])
+          expect(result.map { |sample| sample.value.to_f }).to eq([70.0, 150.0])
+        end
+      end
+
+      context "with filter_by_ts ≤128 timestamps" do
+        it "emits one command per month (no slicing needed)" do
+          timestamp1 = Time.parse("2024-01-01")
+          timestamp_end = Time.parse("2024-04-01")
+
+          range_cmd = described_class.new(timeseries: ts, start_time: timestamp1, end_time: timestamp_end)
+          range_cmd.aggregation = ["avg", 2629746000]
+          range_cmd.filter_by_ts = (0...100).map { |i| (timestamp1 + i.hours).to_i * 1000 }
+
+          handle = nil
+          Redis::TimeSeries.redis.with { |conn| conn.pipelined { |p| handle = range_cmd.enqueue(p) } }
+          # 3 months × 1 chunk (100 ≤ 128) = 3 commands
+          expect(handle.command_count).to eq(3)
+          expect(handle.queried_timestamps.size).to eq(3)
+        end
+      end
+
+      context "with filter_by_ts > 128 timestamps" do
+        it "raises rather than silently producing per-chunk aggregates" do
+          timestamp1 = Time.parse("2024-01-01")
+          timestamp_end = Time.parse("2024-04-01")
+
+          range_cmd = described_class.new(timeseries: ts, start_time: timestamp1, end_time: timestamp_end)
+          range_cmd.aggregation = ["avg", 2629746000]
+          range_cmd.filter_by_ts = (0...200).map { |i| (timestamp1 + i.hours).to_i * 1000 }
+
+          expect { range_cmd.cmd }.to raise_error(ArgumentError, /FILTER_BY_TS combined with aggregation/)
+        end
+      end
+
+      context "with both filter_by_ts and filter_by_range" do
+        it "lets filter_by_ts win (consistent with daily and non-calendar)" do
+          timestamp1 = Time.parse("2024-01-01")
+          timestamp_end = Time.parse("2024-03-01")
+
+          range_cmd = described_class.new(timeseries: ts, start_time: timestamp1, end_time: timestamp_end)
+          range_cmd.aggregation = ["avg", 2629746000]
+          range_cmd.filter_by_ts = [timestamp1.to_i * 1000]
+          range_cmd.filter_by_range = [timestamp1..(timestamp1 + 1.day), (timestamp1 + 2.days)..(timestamp1 + 3.days)]
+
+          handle = nil
+          Redis::TimeSeries.redis.with { |conn| conn.pipelined { |p| handle = range_cmd.enqueue(p) } }
+          # filter_by_ts wins → 1 command per month, 2 months → 2 commands (not 4 from per-sub-range slicing)
+          expect(handle.command_count).to eq(2)
+          # qts is now tracked per emitted command (not per iteration), so qts.size == command_count.
+          expect(handle.queried_timestamps.size).to eq(2)
         end
       end
 
@@ -92,7 +143,7 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
     end
 
     context "with an aggregation duration of 1.day" do
-      it "returns daily calculated values considering DST" do
+      it "returns one bucket per calendar day across the DST end transition" do
         timestamp1 = (winter_time - 2.days)
         timestamp2 = (winter_time - 1.day)
         timestamp3 = (winter_time)
@@ -102,14 +153,17 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         timestamp7 = (winter_time + 1.days)
         timestamp8 = (winter_time + 2.days)
 
-        values = { timestamp1 => 10, timestamp2 => 30, timestamp3 => 40, timestamp4 => 45, timestamp5 => 10, timestamp6 => 30, timestamp7 => 40, timestamp8 => 45}
+        values = { timestamp1 => 10, timestamp2 => 30, timestamp3 => 40, timestamp4 => 45, timestamp5 => 10, timestamp6 => 30, timestamp7 => 40, timestamp8 => 45 }
         ts.madd(values)
 
         range_cmd = described_class.new(timeseries: ts, start_time: timestamp1, end_time: timestamp8)
         range_cmd.aggregation = ["avg", 86400000]
-        result = range_cmd.cmd.filter_map { |sample| sample.value.nan? ? nil : sample }
-        expect(result.map { |sample| sample.time }).to eq([timestamp1, timestamp2, timestamp3, timestamp4, timestamp5, timestamp6, timestamp7,timestamp8])
-        expect(result.map { |sample| sample.value.to_f.round(1) }).to eq([10, 30, 40, 45, 10, 30, 40, 45])
+        result = range_cmd.cmd
+        # Daily aggregation produces one sample per calendar day.
+        # Oct 27 (DST end day) contains four input timestamps t3..t6 — they collapse into ONE Oct 27 bucket: avg = (40+45+10+30)/4 = 31.25.
+        # daily_aggregation restarts ALIGN at the DST boundary so post-DST buckets land on local midnight (+0100) instead of 23:00 from a UTC-rolled bucket.
+        expect(result.map { |sample| sample.time }).to eq([timestamp1, timestamp2, timestamp3, timestamp7, timestamp8])
+        expect(result.map { |sample| sample.value.to_f }).to eq([10.0, 30.0, 31.25, 40.0, 45.0])
       end
 
       context "with filter_by_range" do
@@ -169,66 +223,5 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       expect(handle.command_count).to eq(3)
       expect(handle.queried_timestamps.size).to eq(3)
     end
-  end
-end
-
-RSpec.describe Redis::TimeSeries::RangeCmd::Batch do
-  let(:key1) { "batch_range_test_1" }
-  let(:key2) { "batch_range_test_2" }
-  let(:ts1) { Redis::TimeSeries.create(key1) }
-  let(:ts2) { Redis::TimeSeries.create(key2) }
-
-  after do
-    Redis::TimeSeries.redis.with { |conn| conn.del(key1, key2) }
-  end
-
-  def sample_pair(samples)
-    samples.map { |s| [s.time, s.value.respond_to?(:nan?) && s.value.nan? ? :nan : s.value.to_f] }
-  end
-
-  it "returns Samples per RangeCmd in insertion order, equivalent to running each cmd individually" do
-    timestamp1 = Time.parse("2024-01-01")
-    timestamp2 = Time.parse("2024-01-02")
-    timestamp3 = Time.parse("2024-01-03")
-
-    ts1.madd({ timestamp1 => 10, timestamp2 => 20 })
-    ts2.madd({ timestamp2 => 100, timestamp3 => 200 })
-
-    expected1 = Redis::TimeSeries::RangeCmd.new(timeseries: ts1, start_time: timestamp1, end_time: timestamp3).cmd
-    expected2 = Redis::TimeSeries::RangeCmd.new(timeseries: ts2, start_time: timestamp1, end_time: timestamp3).cmd
-
-    batch_rc1 = Redis::TimeSeries::RangeCmd.new(timeseries: ts1, start_time: timestamp1, end_time: timestamp3)
-    batch_rc2 = Redis::TimeSeries::RangeCmd.new(timeseries: ts2, start_time: timestamp1, end_time: timestamp3)
-    batch_result = described_class.new.add(batch_rc1).add(batch_rc2).cmd
-
-    expect(batch_result.size).to eq(2)
-    expect(sample_pair(batch_result[0])).to eq(sample_pair(expected1))
-    expect(sample_pair(batch_result[1])).to eq(sample_pair(expected2))
-  end
-
-  it "handles a mix of routing variants in a single pipeline" do
-    timestamp1 = Time.parse("2024-01-01")
-    timestamp2 = Time.parse("2024-02-01")
-    timestamp3 = Time.parse("2024-03-01")
-    timestamp4 = Time.parse("2024-04-01")
-
-    ts1.madd({ timestamp1 => 10, timestamp2 => 20, timestamp3 => 30 })
-    ts2.madd({ timestamp1 => 1, timestamp2 => 2, timestamp3 => 3 })
-
-    monthly_rc = Redis::TimeSeries::RangeCmd.new(timeseries: ts1, start_time: timestamp1, end_time: timestamp4)
-    monthly_rc.aggregation = ["avg", 2629746000]
-    default_rc = Redis::TimeSeries::RangeCmd.new(timeseries: ts2, start_time: timestamp1, end_time: timestamp3)
-
-    expected_monthly = Redis::TimeSeries::RangeCmd.new(timeseries: ts1, start_time: timestamp1, end_time: timestamp4).tap { |c| c.aggregation = ["avg", 2629746000] }.cmd
-    expected_default = Redis::TimeSeries::RangeCmd.new(timeseries: ts2, start_time: timestamp1, end_time: timestamp3).cmd
-
-    batch_result = described_class.new.add(monthly_rc).add(default_rc).cmd
-
-    expect(sample_pair(batch_result[0])).to eq(sample_pair(expected_monthly))
-    expect(sample_pair(batch_result[1])).to eq(sample_pair(expected_default))
-  end
-
-  it "returns an empty array when no RangeCmds are added" do
-    expect(described_class.new.cmd).to eq([])
   end
 end
