@@ -49,54 +49,126 @@ class Redis
         options
       end
 
+      # Queue all underlying TS commands for this RangeCmd onto an externally-owned
+      # pipeline and return a PipelineResult handle. The handle captures the
+      # state needed to post-process this RangeCmd's slice of the shared
+      # pipeline result into a Samples collection.
+      def enqueue(pipeline)
+        counting_pipeline = CountingPipeline.new(pipeline)
+        queried_timestamps = route_to_pipeline(counting_pipeline)
+        PipelineResult.new(
+          command_count: counting_pipeline.count,
+          queried_timestamps: queried_timestamps,
+          empty: @empty,
+          aggregation_duration: @aggregation&.duration
+        )
+      end
+
       def cmd
-        result = []
-        queried_timestamps = []
+        handle = nil
+        pipeline_result = nil
         @timeseries.redis.with do |conn|
-          result = conn.pipelined do |pipeline|
-            if @aggregation&.duration == 31556952000
-              queried_timestamps = yearly_aggregation(pipeline)
-            elsif @aggregation&.duration == 2629746000
-              queried_timestamps = monthly_aggregation(pipeline)
-            elsif @aggregation&.duration == 86400000
-              daily_aggregation(pipeline)
-            else
-              if @filter_by_ts
-                sliced_cmd_for_filter_by_ts(pipeline)
-              elsif @filter_by_range
-                sliced_cmd_for_filter_by_range(pipeline)
-              else
-                @timeseries.range_cmd(self, pipeline: pipeline)
-              end
+          pipeline_result = conn.pipelined do |pipeline|
+            handle = enqueue(pipeline)
+          end
+        end
+        handle.resolve(pipeline_result)
+      end
+
+      # Minimal forwarder that counts how many commands a RangeCmd queues onto
+      # the underlying pipeline, so a PipelineResult knows which slice of the
+      # shared pipeline result belongs to it.
+      class CountingPipeline
+        attr_reader :count
+
+        def initialize(pipeline)
+          @pipeline = pipeline
+          @count = 0
+        end
+
+        def call(name, args)
+          @count += 1
+          @pipeline.call(name, args)
+        end
+      end
+      private_constant :CountingPipeline
+
+      # Handle returned from RangeCmd#enqueue. Resolves the slice of the shared
+      # pipeline result array that belongs to a single RangeCmd into a Samples
+      # collection, applying the same post-processing the inline #cmd does
+      # (NaN injection for empty buckets, DST artifact filtering, etc.).
+      class PipelineResult
+        attr_reader :command_count, :queried_timestamps, :aggregation_duration
+
+        def initialize(command_count:, queried_timestamps:, empty:, aggregation_duration:)
+          @command_count = command_count
+          @queried_timestamps = queried_timestamps || []
+          @empty = empty
+          @aggregation_duration = aggregation_duration
+        end
+
+        def empty?
+          @empty
+        end
+
+        # Pull this handle's slice out of a shared pipeline result and return
+        # [Samples, next_offset]. Used by RangeCmd::Batch to walk a single
+        # pipeline result across multiple RangeCmds.
+        def consume(pipeline_result, offset = 0)
+          slice = pipeline_result[offset, command_count] || []
+          [resolve(slice), offset + command_count]
+        end
+
+        def resolve(slice)
+          result = slice
+          remaining_timestamps = queried_timestamps.dup
+
+          # redis timeseries will return an empty array if there are no results.
+          # if @empty is set we want a sample with NaN instead
+          if @empty && !remaining_timestamps.empty?
+            result.map! { |row| row.flatten!(1) }
+            result.map! do |row|
+              timestamp = remaining_timestamps.pop
+              row.blank? ? [timestamp, BigDecimal("NaN")] : row
+            end
+          else
+            result.flatten!(1)
+          end
+
+          # we need this because Redis Timeseries adds an extra record with a different time from the other records when transitioning from summer to winter time.
+          if aggregation_duration == 86400000 && !result.blank?
+            first_timestamp_time = Time.at(result.first.first / 1000).strftime("%H:%M")
+            result = result.select do |ts|
+              Time.at(ts.first / 1000).strftime("%H:%M") == first_timestamp_time
             end
           end
+
+          Samples.new(result.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
         end
-
-
-        # redis timeseries will return an empty array if there are no results.
-        # if @empty is set we want a sample with NaN instead
-        if @empty && !queried_timestamps.empty?
-          result.map! { |row| row.flatten!(1) }
-          result.map! do |row|
-            timestamp = queried_timestamps.pop
-            row.blank? ? [timestamp, BigDecimal("NaN")] : row
-          end
-        else
-          result.flatten!(1)
-        end
-
-        # we need this because Redis Timeseries adds an extra record with a different time from the other records when transitioning from summer to winter time.
-        if @aggregation&.duration == 86400000 && !result.blank?
-          first_timestamp_time = Time.at(result.first.first / 1000).strftime("%H:%M")
-          result = result.select do |ts|
-            Time.at(ts.first / 1000).strftime("%H:%M") == first_timestamp_time
-          end
-        end
-
-        Samples.new(result.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
       end
 
       private
+        def route_to_pipeline(pipeline)
+          case @aggregation&.duration
+          when 31556952000
+            return yearly_aggregation(pipeline)
+          when 2629746000
+            return monthly_aggregation(pipeline)
+          when 86400000
+            daily_aggregation(pipeline)
+            return []
+          end
+
+          if @filter_by_ts
+            sliced_cmd_for_filter_by_ts(pipeline)
+          elsif @filter_by_range
+            sliced_cmd_for_filter_by_range(pipeline)
+          else
+            @timeseries.range_cmd(self, pipeline: pipeline)
+          end
+          []
+        end
+
         def yearly_aggregation(pipeline)
           original_start_time = @start_time
           original_end_time = @end_time
