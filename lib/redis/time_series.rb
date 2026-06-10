@@ -60,6 +60,32 @@ class Redis
         ts
       end
 
+      # Get the most recent sample for many series in a single pipeline round trip,
+      # instead of one +TS.GET+ round trip per series. The batched counterpart of
+      # {TimeSeries#get}, in the same spirit as {RangeCmd.batch}.
+      #
+      # @param series [Array<TimeSeries, String>] the series (or keys) to fetch
+      # @return [Array<Sample, nil>] the most recent sample per series, in input order.
+      #   A series that is empty or does not exist yields +nil+ instead of raising.
+      def batch_get(series)
+        return [] if series.empty?
+
+        replies = redis.with do |conn|
+          conn.pipelined(exception: false) do |pipeline|
+            series.each { |s| cmd("TS.GET", key_for(s), pipeline: pipeline) }
+          end
+        end
+
+        replies.map do |reply|
+          next if reply.nil? || reply.is_a?(RedisClient::CommandError)
+
+          timestamp, value = reply
+          next unless value
+
+          Sample.new(timestamp, value)
+        end
+      end
+
       # Create a compaction rule for a series. Note that both source and destination series
       # must exist before the rule can be created.
       #
