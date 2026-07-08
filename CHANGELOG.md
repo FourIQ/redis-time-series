@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.8.13
+* Batch/single parity specs for `RangeCmd.batch`: `filter_by_range` (schedule shape), `filter_by_value`, daily calendar aggregation + both filters, `revrange`+`count 1`, `filter_by_ts` >128 slicing, and offset-cursor ordering. Confirms every routing variant returns identical results when batched — consumers can now batch schedule-filtered queries.
+
 ## Unreleased
 * Add Ruby 3.4 to build matrix (#89)
 
