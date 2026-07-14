@@ -15,6 +15,11 @@ class Redis
       # Redis TimeSeries hard limit on FILTER_BY_TS list length.
       FILTER_BY_TS_LIMIT = 128
 
+      # Error reply for TS.RANGE/TS.REVRANGE against a non-existent key. Treated
+      # as "no data" so one lost series degrades to an empty result instead of
+      # failing a whole batched render; any other error is a real fault.
+      MISSING_KEY_MESSAGE = "TSDB: the key does not exist"
+
       attr_reader :command, :timeseries
       attr_accessor :filter_by_ts, :filter_by_range, :filter_by_value, :count, :align, :empty
 
@@ -68,10 +73,12 @@ class Redis
       # ─── 3. Single-command execution ──────────────────────────────────
 
       # Runs this RangeCmd on its own and returns a Samples object.
+      # exception: false so a missing key resolves to empty Samples (see
+      # PipelineResult#sanitize) instead of raising.
       def cmd
         handle = nil
         pipeline_result = @timeseries.redis.with do |conn|
-          conn.pipelined { |pipeline| handle = enqueue(pipeline) }
+          conn.pipelined(exception: false) { |pipeline| handle = enqueue(pipeline) }
         end
         handle.resolve(pipeline_result)
       end
@@ -96,8 +103,11 @@ class Redis
         return [] if range_cmds.empty?
 
         handles = []
+        # exception: false keeps per-slot errors in place: one missing series
+        # yields empty Samples for its own slot instead of failing every
+        # RangeCmd in the batch (see PipelineResult#sanitize).
         pipeline_result = range_cmds.first.timeseries.redis.with do |conn|
-          conn.pipelined do |pipeline|
+          conn.pipelined(exception: false) do |pipeline|
             range_cmds.each { |range_cmd| handles << range_cmd.enqueue(pipeline) }
           end
         end
@@ -188,6 +198,7 @@ class Redis
         #
         # Otherwise (daily aggregation, non-calendar paths) the slice is flattened one level; rows already carry their own timestamps and no NaN injection is needed.
         def resolve(slice)
+          slice = slice.map { |raw| sanitize(raw) }
           rows =
             if @empty && !queried_timestamps.empty?
               slice.each_with_index.map do |raw, i|
@@ -206,6 +217,18 @@ class Redis
 
           Samples.new(rows.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
         end
+
+        private
+          # With pipelined(exception: false) a failed command surfaces as an
+          # error object in its slot. A missing series only means "no data"
+          # and becomes an empty reply; anything else is re-raised as
+          # Redis::CommandError — the class plain pipelined raised before, so
+          # callers' rescue contracts are unchanged.
+          def sanitize(raw)
+            return raw unless raw.is_a?(StandardError)
+            raise Redis::CommandError, raw.message unless raw.message.include?(MISSING_KEY_MESSAGE)
+            []
+          end
       end
 
       private

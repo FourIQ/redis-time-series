@@ -11,7 +11,9 @@ require 'redis-time-series'
 
 REDIS_PORT = ENV['REDIS_PORT'] || 9000
 REDIS_HOST = ENV['REDIS_HOST'] || '127.0.0.1'
-REDIS_PASSWORD = ENV['REDIS_PASSWORD'] || ""
+# nil (not "") when unset: redis-client sends AUTH for any non-nil password,
+# which errors against a passwordless Redis.
+REDIS_PASSWORD = ENV['REDIS_PASSWORD'].to_s.empty? ? nil : ENV['REDIS_PASSWORD']
 
 module RedisHelpers
   def redis
