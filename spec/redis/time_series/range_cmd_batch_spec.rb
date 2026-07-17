@@ -63,6 +63,48 @@ RSpec.describe Redis::TimeSeries::RangeCmd, ".batch" do
     expect(described_class.batch(cmds).size).to eq(10)
   end
 
+  describe "missing series keys" do
+    let(:missing_ts) { Redis::TimeSeries.new("batch_range_test_missing") }
+
+    it "resolves a missing key to empty Samples without poisoning the other slots" do
+      timestamp1 = Time.parse("2024-01-01")
+      timestamp2 = Time.parse("2024-01-02")
+      ts1.madd({ timestamp1 => 10, timestamp2 => 20 })
+      ts2.madd({ timestamp1 => 100, timestamp2 => 200 })
+
+      cmds = [ts1, missing_ts, ts2].map { |series| described_class.new(timeseries: series, start_time: timestamp1, end_time: timestamp2) }
+      result = described_class.batch(cmds)
+
+      expect(sample_pair(result[0])).to eq([[timestamp1, 10.0], [timestamp2, 20.0]])
+      expect(result[1]).to be_empty
+      expect(sample_pair(result[2])).to eq([[timestamp1, 100.0], [timestamp2, 200.0]])
+    end
+
+    it "NaN-injects the expected buckets when a missing key is queried with a calendar aggregation" do
+      timestamp1 = Time.parse("2024-01-01")
+      timestamp2 = Time.parse("2024-04-01")
+
+      cmd = described_class.new(timeseries: missing_ts, start_time: timestamp1, end_time: timestamp2)
+      cmd.aggregation = ["avg", 2629746000]
+
+      result = described_class.batch([cmd]).first
+      expect(sample_pair(result)).to eq([
+        [Time.parse("2024-01-01"), :nan],
+        [Time.parse("2024-02-01"), :nan],
+        [Time.parse("2024-03-01"), :nan]
+      ])
+    end
+
+    it "still raises for errors other than a missing key" do
+      Redis::TimeSeries.redis.with { |conn| conn.set("batch_range_test_missing", "not a timeseries") }
+      cmd = described_class.new(timeseries: missing_ts, start_time: Time.parse("2024-01-01"), end_time: Time.parse("2024-01-02"))
+
+      expect { described_class.batch([cmd]) }.to raise_error(Redis::CommandError)
+    ensure
+      Redis::TimeSeries.redis.with { |conn| conn.del("batch_range_test_missing") }
+    end
+  end
+
   it "handles a mix of routing variants in a single pipeline" do
     timestamp1 = Time.parse("2024-01-01")
     timestamp2 = Time.parse("2024-02-01")

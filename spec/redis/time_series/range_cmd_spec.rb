@@ -33,6 +33,25 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       range.cmd
     end
 
+    context "when the series key does not exist" do
+      let(:missing_ts) { Redis::TimeSeries.new("range_test_missing_key") }
+
+      it "returns empty Samples instead of raising" do
+        cmd = described_class.new(timeseries: missing_ts, start_time: Time.parse("2024-01-01"), end_time: Time.parse("2024-01-02"))
+
+        expect(cmd.cmd).to be_empty
+      end
+
+      it "still raises for errors other than a missing key" do
+        Redis::TimeSeries.redis.with { |conn| conn.set("range_test_missing_key", "not a timeseries") }
+        cmd = described_class.new(timeseries: missing_ts, start_time: Time.parse("2024-01-01"), end_time: Time.parse("2024-01-02"))
+
+        expect { cmd.cmd }.to raise_error(Redis::CommandError)
+      ensure
+        Redis::TimeSeries.redis.with { |conn| conn.del("range_test_missing_key") }
+      end
+    end
+
     context "with an aggregation duration of 1.month" do
       it "returns an array of samples aggregated by the duration of that month" do
         timestamp1 = Time.parse("2024-01-01")
