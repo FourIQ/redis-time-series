@@ -1,7 +1,10 @@
 # Changelog
 
 ## Unreleased
+
+## 0.8.13
 * Add Ruby 3.4 to build matrix (#89)
+* `RangeCmd`: a missing series key resolves to an empty `Samples`, not a raised batch (#10)
 
 ## 0.8.1
 * Add Ruby 3.2 to build matrix (#82)
