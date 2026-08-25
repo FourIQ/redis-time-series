@@ -15,11 +15,6 @@ class Redis
       # Redis TimeSeries hard limit on FILTER_BY_TS list length.
       FILTER_BY_TS_LIMIT = 128
 
-      # Error reply for TS.RANGE/TS.REVRANGE against a non-existent key. Treated
-      # as "no data" so one lost series degrades to an empty result instead of
-      # failing a whole batched render; any other error is a real fault.
-      MISSING_KEY_MESSAGE = "TSDB: the key does not exist"
-
       attr_reader :command, :timeseries
       attr_accessor :filter_by_ts, :filter_by_range, :filter_by_value, :count, :align, :empty
 
