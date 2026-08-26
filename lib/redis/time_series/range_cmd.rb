@@ -221,7 +221,7 @@ class Redis
           # callers' rescue contracts are unchanged.
           def sanitize(raw)
             return raw unless raw.is_a?(StandardError)
-            raise Redis::CommandError, raw.message unless raw.message.include?(MISSING_KEY_MESSAGE)
+            raise Redis::CommandError, raw.message unless raw.message.include?(Redis::TimeSeries::MISSING_KEY_MESSAGE)
             []
           end
       end
