@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+* `TS.DEL` against a series that does not exist returns 0 instead of raising — deleting a range that holds nothing is a no-op, so callers no longer have to probe for the key first. Any other command error still raises.
+* `MISSING_KEY_MESSAGE` moves up to `Redis::TimeSeries`, shared with the `RangeCmd` missing-key handling.
 
 ## 0.8.13
 * Add Ruby 3.4 to build matrix (#89)

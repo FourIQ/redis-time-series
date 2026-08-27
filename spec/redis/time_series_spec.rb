@@ -223,6 +223,23 @@ RSpec.describe Redis::TimeSeries do
     specify do
       expect { ts.del(from..to) }.to issue_command("TS.DEL #{key} #{msec(from)} #{msec(to)}")
     end
+
+    context "when the series does not exist" do
+      let(:missing_ts) { described_class.new("time_series_test_missing") }
+
+      # Shared dev Redis, never flushed — an interrupted run must not leave a wrong-type key behind.
+      after { redis.with { |conn| conn.del(missing_ts.key) } }
+
+      it "returns 0 instead of raising" do
+        expect(missing_ts.del(from..to)).to eq(0)
+      end
+
+      it "still raises for errors other than a missing key" do
+        redis.with { |conn| conn.set(missing_ts.key, "not a timeseries") }
+
+        expect { missing_ts.del(from..to) }.to raise_error(Redis::CommandError)
+      end
+    end
   end
 
   describe "TS.INCRBY" do

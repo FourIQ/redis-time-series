@@ -24,6 +24,11 @@ class Redis
     extend Client
     extend Forwardable
 
+    # Error reply for a command issued against a key that holds no series. A
+    # missing series carries no data, so read and delete paths treat it as
+    # "nothing there" rather than a fault; any other error is a real fault.
+    MISSING_KEY_MESSAGE = "TSDB: the key does not exist"
+
     class << self
       # Create a new time series.
       #
@@ -433,10 +438,16 @@ class Redis
     # @param range [Range] A time range to delete.
     #
     # @see https://oss.redislabs.com/redistimeseries/commands/#tsdel
+    # @return [Integer] the number of samples removed; 0 when the series does not
+    #   exist — deleting a range that holds nothing is a no-op, not a fault, so
+    #   callers need not probe for the key first.
     def del(range)
       cmd("TS.DEL", key,
           range.begin,
           range.end)
+    rescue Redis::CommandError, RedisClient::CommandError => e
+      raise unless e.message.include?(MISSING_KEY_MESSAGE)
+      0
     end
 
     # Get a range of values from the series, from most recent to earliest
