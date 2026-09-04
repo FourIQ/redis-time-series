@@ -1,0 +1,71 @@
+name: CI
+
+# Self-contained on purpose. Every other FourIQ repo calls the reusable workflow in FourIQ/development,
+# but this repo is public and that one is private, and GitHub does not let a public repo consume a
+# private repo's reusable workflow. The upside: this gem needs no private gems, no sibling checkout and
+# no database, so it needs no secrets either and runs a real suite on its own.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [develop, main]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      # Redis 8 bundles the TimeSeries module, so the specs need no separate image. No retention
+      # policy here: a server default would evict samples the aggregation specs write days apart.
+      redis:
+        image: redis:8.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+
+    env:
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4.2"
+
+      - name: bundle install
+        run: bundle install --jobs 4
+
+      - name: rubocop
+        id: rubocop
+        continue-on-error: true
+        run: |
+          if ! bundle exec rubocop --version >/dev/null 2>&1; then
+            echo "::notice::rubocop is not in this repo's bundle — skipped"
+            exit 0
+          fi
+          bundle exec rubocop --format github --format progress
+
+      - name: rspec
+        id: rspec
+        continue-on-error: true
+        run: bundle exec rspec
+
+      - name: Verdict
+        run: |
+          {
+            echo "| step | result |"
+            echo "|---|---|"
+            echo "| rubocop | ${{ steps.rubocop.outcome }} |"
+            echo "| rspec | ${{ steps.rspec.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "${{ steps.rubocop.outcome }}" = "success" ] && [ "${{ steps.rspec.outcome }}" = "success" ]
