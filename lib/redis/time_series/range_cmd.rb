@@ -33,12 +33,14 @@ class Redis
 
       # ─── 2. Configuration (chainable) ─────────────────────────────────
 
+      # Calendar slicing reasons about wall-clock boundaries — beginning_of_year, beginning_of_day, a
+      # DST transition — so these have to resolve in the zone the CALLER thinks in. See #zone_at.
       def start_time
-        Time.at(@start_time.is_a?(Numeric) ? @start_time / 1000 : @start_time)
+        CalendarZone.at(@start_time.is_a?(Numeric) ? @start_time / 1000 : @start_time)
       end
 
       def end_time
-        Time.at(@end_time.is_a?(Numeric) ? @end_time / 1000 : @end_time)
+        CalendarZone.at(@end_time.is_a?(Numeric) ? @end_time / 1000 : @end_time)
       end
 
       def aggregation=(aggregation)
@@ -111,6 +113,47 @@ class Redis
         handles.map do |handle|
           samples, offset = handle.consume(pipeline_result, offset)
           samples
+        end
+      end
+
+      # ─── 4b. Zones ────────────────────────────────────────────────────
+      #
+      # A bare `Time.at` renders in the PROCESS zone (ENV["TZ"]), which is the wrong zone for
+      # everything on the calendar path: a calendar bucket is one the application reads back as a
+      # day, month or year, and the application's zone is `Time.zone`. On a UTC-process host — the
+      # container default — that misalignment was silent in three separate places:
+      #
+      #   * every day/month/year bucket aligned to a UTC boundary instead of the app's;
+      #   * daily_aggregation's DST break never fired, because it asked TZInfo about a zone with no
+      #     transitions (and raised outright for a zone abbreviating to a numeric offset, "+14");
+      #   * resolve's DST-artifact filter compared HH:MM in the process zone, so once a break DID
+      #     happen every post-transition row looked like an artifact and was dropped.
+      #
+      # Same root cause as FourIQ/fouriq_shared_models#286 on the consumer side.
+      module CalendarZone
+        module_function
+
+        # Rails' Time.zone when the host application has set one; nil for a standalone caller, which
+        # then keeps the process zone it had before.
+        def zone
+          zone = Time.zone if Time.respond_to?(:zone)
+          zone if zone.respond_to?(:at)
+        end
+
+        def at(seconds)
+          (zone || Time).at(seconds)
+        end
+
+        # The zone whose DST transitions the daily windows break on. nil when there is no transition
+        # data to be had: a process zone abbreviating to a numeric offset is not a TZInfo identifier,
+        # and "no transitions" is what an offset-only zone genuinely has.
+        def dst_timezone
+          resolved = zone
+          return resolved.tzinfo if resolved.respond_to?(:tzinfo)
+
+          TZInfo::Timezone.get(Time.new(Time.now.year, 1, 1).zone)
+        rescue TZInfo::InvalidTimezoneIdentifier
+          nil
         end
       end
 
@@ -205,9 +248,11 @@ class Redis
             end
 
           # Redis TimeSeries adds an extra row at the summer↔winter DST transition for daily aggregations. Drop it by keeping only rows whose HH:MM matches the first row's HH:MM.
+          # In the CALENDAR zone, not the process one: a post-transition local midnight is a different
+          # HH:MM in any other zone, so this filter used to discard every row after a DST break.
           if aggregation_duration == DAILY_DURATION && !rows.empty?
-            first_hhmm = Time.at(rows.first.first / 1000).strftime("%H:%M")
-            rows = rows.select { |row| Time.at(row.first / 1000).strftime("%H:%M") == first_hhmm }
+            first_hhmm = CalendarZone.at(rows.first.first / 1000).strftime("%H:%M")
+            rows = rows.select { |row| CalendarZone.at(row.first / 1000).strftime("%H:%M") == first_hhmm }
           end
 
           Samples.new(rows.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
@@ -227,7 +272,7 @@ class Redis
       end
 
       private
-        # ─── 6. Routing ─────────────────────────────────────────────────
+        # ─── 7. Routing ─────────────────────────────────────────────────
 
         def route_to_pipeline(pipeline)
           return enqueue_calendar_aggregation(pipeline) if calendar_aggregation?
@@ -259,7 +304,7 @@ class Redis
           end
         end
 
-        # ─── 7. Calendar slicing ────────────────────────────────────────
+        # ─── 8. Calendar slicing ────────────────────────────────────────
         #
         # Redis TimeSeries aggregations have a fixed bucket *duration*, not a calendar interval.
         # To aggregate per calendar year/month/day we issue one TS.RANGE per bucket and stitch the results back together in PipelineResult#resolve.
@@ -308,13 +353,13 @@ class Redis
           current_start = start_time
           ts_end_time = end_time
           current_end = end_time - 1
+          tz = CalendarZone.dst_timezone # loop-invariant
 
           while current_end < ts_end_time
-            tz = TZInfo::Timezone.get(Time.new(Time.now.year, 1, 1).zone)
-            end_transition = tz.period_for_local(current_start).end_transition
+            end_transition = tz&.period_for_local(current_start)&.end_transition
 
             if end_transition
-              day_after_dst_transition = Time.at(end_transition.timestamp_value + 1.day).beginning_of_day
+              day_after_dst_transition = CalendarZone.at(end_transition.timestamp_value + 1.day).beginning_of_day
               current_end = day_after_dst_transition < ts_end_time ? day_after_dst_transition - 1 : ts_end_time
               next_current_start = day_after_dst_transition
             else
@@ -331,7 +376,7 @@ class Redis
           []
         end
 
-        # ─── 8. Option slicing ──────────────────────────────────────────
+        # ─── 9. Option slicing ──────────────────────────────────────────
         #
         # TS.RANGE only accepts up to 128 timestamps in FILTER_BY_TS, and FILTER_BY_RANGE is not a native Redis TimeSeries feature.
         # We implement both by emitting one TS.RANGE per slice/range and concatenating the replies on read.
