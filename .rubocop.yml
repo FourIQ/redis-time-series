@@ -1,7 +1,7 @@
 inherit_from:
   # - ../development/.rubocop.yml
 
-require:
+plugins:
   # - rubocop-capybara
   - rubocop-packaging
   - rubocop-performance
