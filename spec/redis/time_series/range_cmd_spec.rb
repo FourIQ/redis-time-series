@@ -162,6 +162,23 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
     end
 
     context "with an aggregation duration of 1.day" do
+      # Every example here depends on a zone that observes DST; CI runs UTC, where a
+      # transition never happens and the assertions would pass without testing anything.
+      around { |example| in_zone("Europe/Amsterdam") { example.run } }
+
+      # One sample per hour, so a daily bucket's count is the number of hours it spans.
+      def seed_hourly(ts, from, to)
+        time = from
+        while time <= to
+          ts.add(1.0, (time.to_f * 1000).to_i)
+          time += 3600
+        end
+      end
+
+      def bucket_labels(samples)
+        samples.map { |sample| Time.at(sample.ts_msec / 1000).strftime("%m-%d %H:%M") }
+      end
+
       it "returns one bucket per calendar day across the DST end transition" do
         timestamp1 = (winter_time - 2.days)
         timestamp2 = (winter_time - 1.day)
@@ -183,6 +200,62 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         # daily_aggregation restarts ALIGN at the DST boundary so post-DST buckets land on local midnight (+0100) instead of 23:00 from a UTC-rolled bucket.
         expect(result.map { |sample| sample.time }).to eq([timestamp1, timestamp2, timestamp3, timestamp7, timestamp8])
         expect(result.map { |sample| sample.value.to_f }).to eq([10.0, 30.0, 31.25, 40.0, 45.0])
+      end
+
+      # The window that broke: buckets are 24h of elapsed time, so from a 14:37 start the
+      # bucket after the autumn transition lands at 13:37 and every later one drifts with
+      # it. The old correction restarted at local midnight and kept only rows matching the
+      # first row's HH:MM, which silently dropped everything after the transition.
+      it "keeps the bucket label stable when the window does not start at midnight" do
+        seed_hourly(ts, Time.parse("2024-10-24"), Time.parse("2024-11-01"))
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-10-25 14:37"),
+                                       end_time: Time.parse("2024-10-29 14:37"))
+        range_cmd.aggregation = ["avg", 86_400_000]
+
+        expect(bucket_labels(range_cmd.cmd)).to eq(["10-25 14:37", "10-26 14:37", "10-27 14:37", "10-28 14:37"])
+      end
+
+      it "keeps the bucket label stable across the spring transition too" do
+        seed_hourly(ts, Time.parse("2024-03-29"), Time.parse("2024-04-03"))
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-03-30 09:15"),
+                                       end_time: Time.parse("2024-04-02 09:15"))
+        range_cmd.aggregation = ["avg", 86_400_000]
+
+        expect(bucket_labels(range_cmd.cmd)).to eq(["03-30 09:15", "03-31 09:15", "04-01 09:15"])
+      end
+
+      it "gives the transition day its real length" do
+        seed_hourly(ts, Time.parse("2024-10-26"), Time.parse("2024-10-29"))
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-10-26"),
+                                       end_time: Time.parse("2024-10-28"))
+        range_cmd.aggregation = ["count", 86_400_000]
+
+        expect(range_cmd.cmd.map { |sample| sample.value.to_i }).to eq([24, 25])
+      end
+
+      # Splitting the transition days out must not turn into one command per day: a year
+      # of daily buckets is two odd days plus the ordinary stretches between them.
+      it "issues one command per run of ordinary days, not one per day" do
+        counting_pipeline = Class.new do
+          attr_reader :count
+
+          def initialize = @count = 0
+          def call(_name, _args) = @count += 1
+        end.new
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-01-01 06:30"),
+                                       end_time: Time.parse("2024-12-31 06:30"))
+        range_cmd.aggregation = ["avg", 86_400_000]
+        range_cmd.enqueue(counting_pipeline)
+
+        expect(counting_pipeline.count).to eq(5)
       end
 
       context "with filter_by_range" do

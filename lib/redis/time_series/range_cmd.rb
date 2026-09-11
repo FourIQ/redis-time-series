@@ -127,8 +127,7 @@ class Redis
         PipelineResult.new(
           command_count: counting_pipeline.count,
           queried_timestamps: queried_timestamps,
-          empty: @empty,
-          aggregation_duration: @aggregation&.duration
+          empty: @empty
         )
       end
 
@@ -164,15 +163,14 @@ class Redis
       # Handle returned from RangeCmd#enqueue. Resolves the slice of the shared
       # pipeline result array that belongs to a single RangeCmd into a Samples
       # collection, applying the same post-processing the inline #cmd does
-      # (NaN injection for empty buckets, DST artifact filtering, etc.).
+      # (NaN injection for empty buckets).
       class PipelineResult
-        attr_reader :command_count, :queried_timestamps, :aggregation_duration
+        attr_reader :command_count, :queried_timestamps
 
-        def initialize(command_count:, queried_timestamps:, empty:, aggregation_duration:)
+        def initialize(command_count:, queried_timestamps:, empty:)
           @command_count = command_count
           @queried_timestamps = queried_timestamps || []
           @empty = empty
-          @aggregation_duration = aggregation_duration
         end
 
         def empty?
@@ -203,12 +201,6 @@ class Redis
             else
               slice.flatten(1)
             end
-
-          # Redis TimeSeries adds an extra row at the summer↔winter DST transition for daily aggregations. Drop it by keeping only rows whose HH:MM matches the first row's HH:MM.
-          if aggregation_duration == DAILY_DURATION && !rows.empty?
-            first_hhmm = Time.at(rows.first.first / 1000).strftime("%H:%M")
-            rows = rows.select { |row| Time.at(row.first / 1000).strftime("%H:%M") == first_hhmm }
-          end
 
           Samples.new(rows.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
         end
@@ -302,33 +294,50 @@ class Redis
           queried_timestamps
         end
 
-        # Walks day-by-day windows but breaks them at DST transitions, because Redis TimeSeries would otherwise drift by an hour for the rest of the year.
+        # One bucket per calendar day, counted from the window start. A Redis bucket is a fixed span of *elapsed* time, so the day a DST transition falls in is 23 or 25 hours long and every bucket after it drifts in wall-clock terms; that day is therefore asked for on its own, with its real length. Runs of ordinary 24-hour days still go out as one TS.RANGE each, so a year of daily buckets costs three commands, not 365.
         # Returns [] to match calendar_aggregation_loop's signature — daily replies carry per-bucket timestamps already, so no queried_timestamps tracking is needed.
         def daily_aggregation(pipeline)
-          current_start = start_time
-          ts_end_time = end_time
-          current_end = end_time - 1
+          original_start_time = @start_time
+          original_end_time = @end_time
+          original_aggregation = @aggregation
 
-          while current_end < ts_end_time
-            tz = TZInfo::Timezone.get(Time.new(Time.now.year, 1, 1).zone)
-            end_transition = tz.period_for_local(current_start).end_transition
-
-            if end_transition
-              day_after_dst_transition = Time.at(end_transition.timestamp_value + 1.day).beginning_of_day
-              current_end = day_after_dst_transition < ts_end_time ? day_after_dst_transition - 1 : ts_end_time
-              next_current_start = day_after_dst_transition
-            else
-              current_end = ts_end_time
-              next_current_start = ts_end_time
-            end
-
-            @start_time = current_start
-            @end_time = current_end
+          day_runs.each do |run_start, run_end, bucket_duration|
+            self.aggregation = [original_aggregation.type, bucket_duration]
+            @start_time = run_start
+            @end_time = run_end
             enqueue_window(pipeline)
-            current_start = next_current_start
           end
 
+          @start_time = original_start_time
+          @end_time = original_end_time
+          @aggregation = original_aggregation
           []
+        end
+
+        # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Day boundaries are walked with #advance, which counts calendar days in the local zone, so a day whose length is not DAILY_DURATION is exactly a day a transition falls in.
+        def day_runs
+          window_end = end_time
+          runs = []
+          run_start = start_time
+          cursor = start_time
+
+          while cursor < window_end
+            next_day = cursor.advance(days: 1)
+            day_duration = ((next_day - cursor) * 1000).round
+
+            if day_duration == DAILY_DURATION
+              cursor = next_day
+              next
+            end
+
+            runs << [run_start, cursor - 1, DAILY_DURATION] if cursor > run_start
+            runs << [cursor, [next_day - 1, window_end].min, day_duration]
+            run_start = next_day
+            cursor = next_day
+          end
+
+          runs << [run_start, window_end, DAILY_DURATION] if run_start < window_end
+          runs
         end
 
         # ─── 8. Option slicing ──────────────────────────────────────────
