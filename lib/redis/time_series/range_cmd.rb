@@ -314,30 +314,44 @@ class Redis
           []
         end
 
-        # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Day boundaries are walked with #advance, which counts calendar days in the local zone, so a day whose length is not DAILY_DURATION is exactly a day a transition falls in.
+        # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length.
         def day_runs
           window_end = end_time
           runs = []
           run_start = start_time
-          cursor = start_time
 
-          while cursor < window_end
-            next_day = cursor.advance(days: 1)
-            day_duration = ((next_day - cursor) * 1000).round
-
-            if day_duration == DAILY_DURATION
-              cursor = next_day
-              next
-            end
-
-            runs << [run_start, cursor - 1, DAILY_DURATION] if cursor > run_start
-            runs << [cursor, [next_day - 1, window_end].min, day_duration]
-            run_start = next_day
-            cursor = next_day
+          transition_days.each do |day_start, day_end|
+            runs << [run_start, day_start - 1, DAILY_DURATION] if day_start > run_start
+            runs << [day_start, [day_end - 1, window_end].min, ((day_end - day_start) * 1000).round]
+            run_start = day_end
           end
 
           runs << [run_start, window_end, DAILY_DURATION] if run_start < window_end
           runs
+        end
+
+        # The days in the window that are not 24 hours long, as [start, end] pairs. The clock changes at most twice a year, so the search is by month and only descends into days for a month whose offset moves — a three-year window walks ~40 Time objects instead of ~1100. Every boundary comes from #advance, which keeps the time of day, so a month boundary always sits on the day grid the window start defines.
+        def transition_days
+          window_end = end_time
+          days = []
+          month = start_time
+
+          while month < window_end
+            next_month = [month.advance(months: 1), window_end].min
+
+            if month.utc_offset != next_month.utc_offset
+              day = month
+              while day < next_month
+                next_day = day.advance(days: 1)
+                days << [day, next_day] if ((next_day - day) * 1000).round != DAILY_DURATION
+                day = next_day
+              end
+            end
+
+            month = next_month
+          end
+
+          days
         end
 
         # ─── 8. Option slicing ──────────────────────────────────────────
