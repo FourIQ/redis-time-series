@@ -330,25 +330,36 @@ class Redis
           runs
         end
 
-        # The days in the window that are not 24 hours long, as [start, end] pairs. The clock changes at most twice a year, so the search is by month and only descends into days for a month whose offset moves — a three-year window walks ~40 Time objects instead of ~1100. Every boundary comes from #advance, which keeps the time of day, so a month boundary always sits on the day grid the window start defines.
+        # A stride short enough that no two clock changes can fall inside one.
+        TRANSITION_PROBE_STRIDE = 14 * 86_400
+        private_constant :TRANSITION_PROBE_STRIDE
+
+        # The days in the window that are not 24 hours long, as [start, end] pairs. Days are a fixed 86_400 seconds apart except where the clock moves, so the window is skipped through a stride at a time on plain arithmetic and only a stride whose UTC offset moves is walked day by day. A year costs ~65 Time objects instead of 365, and a window with no transition in it costs one probe per stride and nothing else.
         def transition_days
           window_end = end_time
           days = []
-          month = start_time
+          grid = start_time
 
-          while month < window_end
-            next_month = [month.advance(months: 1), window_end].min
+          while grid < window_end
+            probe = [grid + TRANSITION_PROBE_STRIDE, window_end].min
 
-            if month.utc_offset != next_month.utc_offset
-              day = month
-              while day < next_month
-                next_day = day.advance(days: 1)
-                days << [day, next_day] if ((next_day - day) * 1000).round != DAILY_DURATION
-                day = next_day
-              end
+            if probe.utc_offset == grid.utc_offset
+              whole_days = ((probe - grid) / 86_400).floor
+              break if whole_days.zero?
+
+              grid += whole_days * 86_400
+              next
             end
 
-            month = next_month
+            # The clock moves somewhere in this stride; find the day it moves in.
+            while grid < probe
+              next_grid = grid + 86_400
+              if next_grid.utc_offset != grid.utc_offset
+                next_grid += grid.utc_offset - next_grid.utc_offset
+                days << [grid, next_grid]
+              end
+              grid = next_grid
+            end
           end
 
           days
