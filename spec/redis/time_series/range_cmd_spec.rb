@@ -258,6 +258,88 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         expect(counting_pipeline.count).to eq(5)
       end
 
+      # Each of the four below is a zone or a window the walker used to get wrong; all reproduced
+      # against real Redis before being pinned here.
+
+      # 02:00-02:59 does not exist on the spring-forward day, so the day that "ends" at 02:30 ends
+      # 24 elapsed hours later at 03:30 instead. Correcting it back into the gap invented a second
+      # short day and put every later label an hour out.
+      it "does not invent a short day when the window sits in the spring-forward gap" do
+        seed_hourly(ts, Time.parse("2024-03-28"), Time.parse("2024-04-04"))
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-03-29 02:30"),
+                                       end_time: Time.parse("2024-04-02 02:30"))
+        range_cmd.aggregation = ["count", 86_400_000]
+        result = range_cmd.cmd
+
+        # The last bucket is short only because the window ends inside it.
+        expect(bucket_labels(result)).to eq(["03-29 02:30", "03-30 02:30", "03-31 03:30", "04-01 03:30"])
+        expect(result.map { |sample| sample.value.to_i }).to eq([24, 24, 24, 23])
+      end
+
+      # A zero-length window enqueued one command before the window was ever split into runs, and
+      # a caller asking for a single instant should still get its bucket rather than empty Samples.
+      it "still enqueues one command for a zero-length window" do
+        counting_pipeline = Class.new do
+          attr_reader :count
+
+          def initialize = @count = 0
+          def call(_name, _args) = @count += 1
+        end.new
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-06-01"),
+                                       end_time: Time.parse("2024-06-01"))
+        range_cmd.aggregation = ["avg", 86_400_000]
+        range_cmd.enqueue(counting_pipeline)
+
+        expect(counting_pipeline.count).to eq(1)
+      end
+
+      context "in a zone whose offset moves by a whole day" do
+        around { |example| in_zone("Pacific/Apia") { example.run } }
+
+        # Samoa skipped 2011-12-30 entirely. Correcting the step by a 24-hour offset delta left the
+        # grid standing still, and the walk hung inside the Redis pipeline block rather than ending.
+        it "walks past the skipped day instead of hanging" do
+          seed_hourly(ts, Time.parse("2011-12-27"), Time.parse("2012-01-03"))
+
+          range_cmd = described_class.new(timeseries: ts,
+                                         start_time: Time.parse("2011-12-28"),
+                                         end_time: Time.parse("2012-01-02"))
+          range_cmd.aggregation = ["count", 86_400_000]
+          result = Timeout.timeout(15) { range_cmd.cmd }
+
+          # 12-30 is absent because Samoa never had one.
+          expect(bucket_labels(result)).to eq(["12-28 00:00", "12-29 00:00", "12-31 00:00", "01-01 00:00", "01-02 00:00"])
+        end
+      end
+
+      context "in a zone with two transitions barely a week apart" do
+        around { |example| in_zone("America/Boa_Vista") { example.run } }
+
+        # Brazil started DST on 2000-10-08 and suspended it again on 2000-10-15. Any search that
+        # skips ahead and compares offsets at the ends of a stride sees them cancel and finds
+        # nothing, which is silently the behaviour this whole change exists to remove.
+        it "finds both transitions" do
+          seed_hourly(ts, Time.parse("2000-10-05"), Time.parse("2000-10-20"))
+
+          range_cmd = described_class.new(timeseries: ts,
+                                         start_time: Time.parse("2000-10-06"),
+                                         end_time: Time.parse("2000-10-18"))
+          range_cmd.aggregation = ["count", 86_400_000]
+
+          result = range_cmd.cmd
+
+          # DST starts at midnight on 10-08, so that day has no 00:00 and the grid carries on an
+          # hour later; it ends on 10-15, making the day before it 25 hours long. A strided search
+          # sees the two offsets cancel and reports neither.
+          expect(bucket_labels(result).first(3)).to eq(["10-06 00:00", "10-07 00:00", "10-08 01:00"])
+          expect(result.map { |sample| sample.value.to_i }).to eq([24, 24, 24, 24, 24, 24, 24, 24, 25, 24, 24, 24])
+        end
+      end
+
       context "with filter_by_range" do
         it "returns daily calculated values filtered by range" do
         timestamp1 = Time.parse("2024-01-01")

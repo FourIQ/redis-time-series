@@ -7,6 +7,7 @@ require 'active_support/core_ext/numeric/time'
 require 'active_support/testing/time_helpers'
 require 'pry'
 require 'redis'
+require 'timeout'
 require 'redis-time-series'
 
 REDIS_PORT = ENV['REDIS_PORT'] || 9000

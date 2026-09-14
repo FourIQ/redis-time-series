@@ -326,43 +326,43 @@ class Redis
             run_start = day_end
           end
 
-          runs << [run_start, window_end, DAILY_DURATION] if run_start < window_end
+          # `runs.empty?` keeps a zero-length window (from == to) enqueueing the one command it
+          # enqueued before this split existed, rather than silently returning no samples at all.
+          runs << [run_start, window_end, DAILY_DURATION] if run_start < window_end || runs.empty?
           runs
         end
 
-        # A stride short enough that no two clock changes can fall inside one.
-        TRANSITION_PROBE_STRIDE = 14 * 86_400
-        private_constant :TRANSITION_PROBE_STRIDE
-
-        # The days in the window that are not 24 hours long, as [start, end] pairs. Days are a fixed 86_400 seconds apart except where the clock moves, so the window is skipped through a stride at a time on plain arithmetic and only a stride whose UTC offset moves is walked day by day. A year costs ~65 Time objects instead of 365, and a window with no transition in it costs one probe per stride and nothing else.
+        # The days in the window that are not 24 hours long, as [start, end] pairs. Days sit a fixed 86_400 seconds apart except where the clock moves, so the walk is plain Time arithmetic: one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
+        #
+        # Deliberately not strided. Skipping ahead and comparing the offsets at the two ends misses a pair of transitions inside one stride whose offsets cancel, and tzdata carries 15 such pairs closer than a fortnight -- the tightest is America/Cambridge_Bay, 6.92 days in 2000, a country suspending DST a week after starting it. Where that happens the stride is skipped whole and NO transition is found, which is silently the pre-fix behaviour.
         def transition_days
           window_end = end_time
           days = []
           grid = start_time
 
           while grid < window_end
-            probe = [grid + TRANSITION_PROBE_STRIDE, window_end].min
-
-            if probe.utc_offset == grid.utc_offset
-              whole_days = ((probe - grid) / 86_400).floor
-              break if whole_days.zero?
-
-              grid += whole_days * 86_400
-              next
-            end
-
-            # The clock moves somewhere in this stride; find the day it moves in.
-            while grid < probe
-              next_grid = grid + 86_400
-              if next_grid.utc_offset != grid.utc_offset
-                next_grid += grid.utc_offset - next_grid.utc_offset
-                days << [grid, next_grid]
-              end
-              grid = next_grid
-            end
+            next_grid = next_day_boundary(grid)
+            days << [grid, next_grid] if ((next_grid - grid) * 1000).round != DAILY_DURATION
+            grid = next_grid
           end
 
           days
+        end
+
+        # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
+        def next_day_boundary(grid)
+          elapsed_day = grid + 86_400
+          return elapsed_day if elapsed_day.utc_offset == grid.utc_offset
+
+          adjusted = elapsed_day + (grid.utc_offset - elapsed_day.utc_offset)
+          # A time of day the spring-forward skips does not exist on the transition day, so the
+          # adjustment lands an hour before the gap instead of on it: that day is a plain 24h day.
+          return elapsed_day unless adjusted.hour == grid.hour && adjusted.min == grid.min
+          # An offset that moves by a whole day (Pacific/Apia 2011, Pacific/Kiritimati 1994) would
+          # otherwise leave the grid standing still, and the caller hangs inside the pipeline block.
+          return elapsed_day if adjusted <= grid
+
+          adjusted
         end
 
         # ─── 8. Option slicing ──────────────────────────────────────────
