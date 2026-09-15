@@ -314,16 +314,25 @@ class Redis
           []
         end
 
-        # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length.
+        # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Days sit a fixed 86_400 seconds apart except where the clock moves, so this is plain Time arithmetic — one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
+        #
+        # Deliberately not strided. Skipping ahead and comparing the offsets at the two ends of a stride cannot see a pair of transitions inside it whose offsets cancel, and tzdata carries 15 such pairs closer than a fortnight -- the tightest America/Cambridge_Bay, 6.92 days in 2000. Where that happens the stride is skipped whole and NO transition is found, which is silently the behaviour this change exists to remove.
         def day_runs
           window_end = end_time
           runs = []
-          run_start = start_time
+          run_start = grid = start_time
 
-          transition_days.each do |day_start, day_end|
-            runs << [run_start, day_start - 1, DAILY_DURATION] if day_start > run_start
-            runs << [day_start, [day_end - 1, window_end].min, ((day_end - day_start) * 1000).round]
-            run_start = day_end
+          while grid < window_end
+            next_grid = next_day_boundary(grid)
+            day_duration = ((next_grid - grid) * 1000).round
+
+            if day_duration != DAILY_DURATION
+              runs << [run_start, grid - 1, DAILY_DURATION] if grid > run_start
+              runs << [grid, [next_grid - 1, window_end].min, day_duration]
+              run_start = next_grid
+            end
+
+            grid = next_grid
           end
 
           # `runs.empty?` keeps a zero-length window (from == to) enqueueing the one command it
@@ -332,22 +341,6 @@ class Redis
           runs
         end
 
-        # The days in the window that are not 24 hours long, as [start, end] pairs. Days sit a fixed 86_400 seconds apart except where the clock moves, so the walk is plain Time arithmetic: one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
-        #
-        # Deliberately not strided. Skipping ahead and comparing the offsets at the two ends misses a pair of transitions inside one stride whose offsets cancel, and tzdata carries 15 such pairs closer than a fortnight -- the tightest is America/Cambridge_Bay, 6.92 days in 2000, a country suspending DST a week after starting it. Where that happens the stride is skipped whole and NO transition is found, which is silently the pre-fix behaviour.
-        def transition_days
-          window_end = end_time
-          days = []
-          grid = start_time
-
-          while grid < window_end
-            next_grid = next_day_boundary(grid)
-            days << [grid, next_grid] if ((next_grid - grid) * 1000).round != DAILY_DURATION
-            grid = next_grid
-          end
-
-          days
-        end
 
         # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
         def next_day_boundary(grid)
