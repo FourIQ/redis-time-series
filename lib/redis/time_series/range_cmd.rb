@@ -333,11 +333,13 @@ class Redis
             @end_time = run_end
             enqueue_window(pipeline)
           end
-
+          []
+        ensure
+          # A raise inside the pipeline block would otherwise leave this RangeCmd pointing at one
+          # sub-window with a 25-hour aggregation, and a caller that retries it queries the wrong range.
           @start_time = original_start_time
           @end_time = original_end_time
           @aggregation = original_aggregation
-          []
         end
 
         # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Days sit a fixed 86_400 seconds apart except where the clock moves, so this is plain Time arithmetic — one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
@@ -367,8 +369,13 @@ class Redis
           runs
         end
 
-
         # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
+        #
+        # A time of day the clock skips does not exist on the transition day, so the step stays a
+        # plain 24 elapsed hours and the label moves instead. Where the skipped span crosses
+        # midnight (Europe/Bucharest 1980-04-05, Asia/Pyongyang 2018-05-04) the label moves onto the
+        # next date and that calendar day gets no bucket at all — no data is lost, the bucket either
+        # side is a true 24 hours, but a caller drawing one bar per day draws one fewer that year.
         def next_day_boundary(grid)
           elapsed_day = grid + 86_400
           return elapsed_day if elapsed_day.utc_offset == grid.utc_offset
