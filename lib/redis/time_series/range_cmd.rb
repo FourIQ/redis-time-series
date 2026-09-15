@@ -33,12 +33,14 @@ class Redis
 
       # ─── 2. Configuration (chainable) ─────────────────────────────────
 
+      # Calendar slicing reasons about wall-clock boundaries — beginning_of_year, beginning_of_day, a
+      # DST transition — so these have to resolve in the zone the CALLER thinks in. See #zone_at.
       def start_time
-        Time.at(@start_time.is_a?(Numeric) ? @start_time / 1000 : @start_time)
+        CalendarZone.at(@start_time.is_a?(Numeric) ? @start_time / 1000 : @start_time)
       end
 
       def end_time
-        Time.at(@end_time.is_a?(Numeric) ? @end_time / 1000 : @end_time)
+        CalendarZone.at(@end_time.is_a?(Numeric) ? @end_time / 1000 : @end_time)
       end
 
       def aggregation=(aggregation)
@@ -114,6 +116,30 @@ class Redis
         end
       end
 
+      # ─── 4b. Zones ────────────────────────────────────────────────────
+      #
+      # A bare `Time.at` renders in the PROCESS zone (ENV["TZ"]), which is the wrong zone for
+      # everything on the calendar path: a calendar bucket is one the application reads back as a
+      # day, month or year, and the application's zone is `Time.zone`. On a UTC-process host — the
+      # container default — that misalignment was silent: every day/month/year bucket aligned to a
+      # UTC boundary instead of the app's.
+      #
+      # Same root cause as FourIQ/fouriq_shared_models#286 on the consumer side.
+      module CalendarZone
+        module_function
+
+        # Rails' Time.zone when the host application has set one; nil for a standalone caller, which
+        # then keeps the process zone it had before.
+        def zone
+          zone = Time.zone if Time.respond_to?(:zone)
+          zone if zone.respond_to?(:at)
+        end
+
+        def at(seconds)
+          (zone || Time).at(seconds)
+        end
+      end
+
       # ─── 5. Enqueue + handle ──────────────────────────────────────────
 
       # Queue all underlying TS commands for this RangeCmd onto an externally-owned
@@ -127,8 +153,7 @@ class Redis
         PipelineResult.new(
           command_count: counting_pipeline.count,
           queried_timestamps: queried_timestamps,
-          empty: @empty,
-          aggregation_duration: @aggregation&.duration
+          empty: @empty
         )
       end
 
@@ -164,15 +189,14 @@ class Redis
       # Handle returned from RangeCmd#enqueue. Resolves the slice of the shared
       # pipeline result array that belongs to a single RangeCmd into a Samples
       # collection, applying the same post-processing the inline #cmd does
-      # (NaN injection for empty buckets, DST artifact filtering, etc.).
+      # (NaN injection for empty buckets).
       class PipelineResult
-        attr_reader :command_count, :queried_timestamps, :aggregation_duration
+        attr_reader :command_count, :queried_timestamps
 
-        def initialize(command_count:, queried_timestamps:, empty:, aggregation_duration:)
+        def initialize(command_count:, queried_timestamps:, empty:)
           @command_count = command_count
           @queried_timestamps = queried_timestamps || []
           @empty = empty
-          @aggregation_duration = aggregation_duration
         end
 
         def empty?
@@ -203,12 +227,6 @@ class Redis
             else
               slice.flatten(1)
             end
-
-          # Redis TimeSeries adds an extra row at the summer↔winter DST transition for daily aggregations. Drop it by keeping only rows whose HH:MM matches the first row's HH:MM.
-          if aggregation_duration == DAILY_DURATION && !rows.empty?
-            first_hhmm = Time.at(rows.first.first / 1000).strftime("%H:%M")
-            rows = rows.select { |row| Time.at(row.first / 1000).strftime("%H:%M") == first_hhmm }
-          end
 
           Samples.new(rows.filter_map { |timestamp, val| timestamp.nil? ? nil : Sample.new(timestamp, val) })
         end
@@ -302,33 +320,68 @@ class Redis
           queried_timestamps
         end
 
-        # Walks day-by-day windows but breaks them at DST transitions, because Redis TimeSeries would otherwise drift by an hour for the rest of the year.
+        # One bucket per calendar day, counted from the window start. A Redis bucket is a fixed span of *elapsed* time, so the day a DST transition falls in is 23 or 25 hours long and every bucket after it drifts in wall-clock terms; that day is therefore asked for on its own, with its real length. Runs of ordinary 24-hour days still go out as one TS.RANGE each, so a year of daily buckets costs three commands, not 365.
         # Returns [] to match calendar_aggregation_loop's signature — daily replies carry per-bucket timestamps already, so no queried_timestamps tracking is needed.
         def daily_aggregation(pipeline)
-          current_start = start_time
-          ts_end_time = end_time
-          current_end = end_time - 1
+          original_start_time = @start_time
+          original_end_time = @end_time
+          original_aggregation = @aggregation
 
-          while current_end < ts_end_time
-            tz = TZInfo::Timezone.get(Time.new(Time.now.year, 1, 1).zone)
-            end_transition = tz.period_for_local(current_start).end_transition
-
-            if end_transition
-              day_after_dst_transition = Time.at(end_transition.timestamp_value + 1.day).beginning_of_day
-              current_end = day_after_dst_transition < ts_end_time ? day_after_dst_transition - 1 : ts_end_time
-              next_current_start = day_after_dst_transition
-            else
-              current_end = ts_end_time
-              next_current_start = ts_end_time
-            end
-
-            @start_time = current_start
-            @end_time = current_end
+          day_runs.each do |run_start, run_end, bucket_duration|
+            self.aggregation = [original_aggregation.type, bucket_duration]
+            @start_time = run_start
+            @end_time = run_end
             enqueue_window(pipeline)
-            current_start = next_current_start
           end
 
+          @start_time = original_start_time
+          @end_time = original_end_time
+          @aggregation = original_aggregation
           []
+        end
+
+        # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Days sit a fixed 86_400 seconds apart except where the clock moves, so this is plain Time arithmetic — one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
+        #
+        # Deliberately not strided. Skipping ahead and comparing the offsets at the two ends of a stride cannot see a pair of transitions inside it whose offsets cancel, and tzdata carries 15 such pairs closer than a fortnight -- the tightest America/Cambridge_Bay, 6.92 days in 2000. Where that happens the stride is skipped whole and NO transition is found, which is silently the behaviour this change exists to remove.
+        def day_runs
+          window_end = end_time
+          runs = []
+          run_start = grid = start_time
+
+          while grid < window_end
+            next_grid = next_day_boundary(grid)
+            day_duration = ((next_grid - grid) * 1000).round
+
+            if day_duration != DAILY_DURATION
+              runs << [run_start, grid - 1, DAILY_DURATION] if grid > run_start
+              runs << [grid, [next_grid - 1, window_end].min, day_duration]
+              run_start = next_grid
+            end
+
+            grid = next_grid
+          end
+
+          # `runs.empty?` keeps a zero-length window (from == to) enqueueing the one command it
+          # enqueued before this split existed, rather than silently returning no samples at all.
+          runs << [run_start, window_end, DAILY_DURATION] if run_start < window_end || runs.empty?
+          runs
+        end
+
+
+        # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
+        def next_day_boundary(grid)
+          elapsed_day = grid + 86_400
+          return elapsed_day if elapsed_day.utc_offset == grid.utc_offset
+
+          adjusted = elapsed_day + (grid.utc_offset - elapsed_day.utc_offset)
+          # A time of day the spring-forward skips does not exist on the transition day, so the
+          # adjustment lands an hour before the gap instead of on it: that day is a plain 24h day.
+          return elapsed_day unless adjusted.hour == grid.hour && adjusted.min == grid.min
+          # An offset that moves by a whole day (Pacific/Apia 2011, Pacific/Kiritimati 1994) would
+          # otherwise leave the grid standing still, and the caller hangs inside the pipeline block.
+          return elapsed_day if adjusted <= grid
+
+          adjusted
         end
 
         # ─── 8. Option slicing ──────────────────────────────────────────

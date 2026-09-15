@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+* Calendar buckets (daily/monthly/yearly aggregation, and `start_time`/`end_time`) now resolve in the application's `Time.zone` instead of the process zone (`ENV["TZ"]`) — on a UTC-process host, the container default, every calendar bucket was silently aligning to UTC boundaries instead of the app's own day/month/year.
+* Daily aggregation (`aggregation: [type, 1.day]`) returns one bucket per calendar day again for a window that does not start at midnight. A Redis bucket spans a fixed amount of *elapsed* time, so the day a DST transition falls in is 23 or 25 hours long; that day is now requested on its own with its real length, and the surrounding stretches of ordinary days still go out as one `TS.RANGE` each. Previously the correction restarted the bucket grid at local midnight and kept only rows matching the first row's `HH:MM`, which silently dropped **every** bucket after the first transition unless the window happened to start at midnight.
+* `RangeCmd::PipelineResult` no longer takes `aggregation_duration:` — the DST row filter it fed is gone.
 
 ## 0.8.14
 * `TS.DEL` against a series that does not exist returns 0 instead of raising — deleting a range that holds nothing is a no-op, so callers no longer have to probe for the key first. Any other command error still raises.
