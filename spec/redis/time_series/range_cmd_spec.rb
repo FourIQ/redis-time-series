@@ -383,6 +383,25 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         expect(range_cmd.cmd.size).to be > 0
       end
 
+      # The other half of the same bug: a schedule that IS configured, but whose windows cross
+      # midnight (a night baseload, 22:00 -> 06:00), straddles a run boundary on the transition day
+      # and lost those nights rather than the whole read.
+      it "keeps filter_by_range windows that cross a day boundary" do
+        seed_hourly(ts, Time.parse("2024-10-24"), Time.parse("2024-10-30"))
+        nights = (25..28).map { |day| Time.parse("2024-10-#{day} 22:00")..Time.parse("2024-10-#{day + 1} 06:00") }
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-10-25"),
+                                       end_time: Time.parse("2024-10-29"))
+        range_cmd.aggregation = ["count", 86_400_000]
+        range_cmd.filter_by_range = nights
+        counted = range_cmd.cmd.sum { |sample| sample.value.to_f.nan? ? 0 : sample.value.to_i }
+
+        # 9 hourly samples a night, 10 on the night the clocks go back, and 3 on the last one
+        # because the window ends inside it — clipped, not dropped.
+        expect(counted).to eq(31)
+      end
+
       # A Time serialises as `to_i * 1000`, so closing a run a whole second early left a
       # millisecond gap between one run and the next that no TS.RANGE covered.
       it "does not lose a sample in the millisecond before a run boundary" do
