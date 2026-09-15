@@ -28,6 +28,18 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
   end
 
   describe "#cmd" do
+    # Fails part-way through a multi-command enqueue, the way a dropped connection would.
+    def exploding_pipeline
+      Class.new do
+        def initialize = @calls = 0
+
+        def call(_name, _args)
+          @calls += 1
+          raise "boom" if @calls == 2
+        end
+      end.new
+    end
+
     it "calls cmd on the timeseries" do
       expect(range).to receive(:cmd)
       range.cmd
@@ -158,6 +170,20 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
           result = range_cmd.cmd
           expect(result.map { |sample| sample.time }).to eq([timestamp1, timestamp2, timestamp3])
         end
+      end
+      # calendar_aggregation_loop narrows the window per month, with that month's exact length as
+      # the bucket size, and had the same leak daily_aggregation did.
+      it "restores its window and bucket size when a month raises" do
+        from = Time.parse("2024-01-01")
+        to = Time.parse("2024-04-01")
+        range_cmd = described_class.new(timeseries: ts, start_time: from, end_time: to)
+        range_cmd.aggregation = ["avg", 2_629_746_000]
+
+        expect { range_cmd.enqueue(exploding_pipeline) }.to raise_error("boom")
+
+        expect(range_cmd.start_time).to eq(from)
+        expect(range_cmd.end_time).to eq(to)
+        expect(range_cmd.options).to include(["AGGREGATION", "avg", 2_629_746_000])
       end
     end
 
@@ -370,6 +396,57 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         range_cmd.aggregation = ["count", 86_400_000]
 
         expect(range_cmd.cmd.sum { |sample| sample.value.to_f.nan? ? 0 : sample.value.to_i }).to eq(2)
+      end
+
+      # The window ends on a day boundary, so the final instant falls outside the transition run.
+      # It used to be dropped, while the same window in a week with no transition kept it.
+      it "keeps a sample sitting exactly on the window end" do
+        seed_hourly(ts, Time.parse("2024-10-25"), Time.parse("2024-10-27"))
+        finish = Time.parse("2024-10-28")
+        ts.add(1.0, (finish.to_f * 1000).to_i)
+
+        range_cmd = described_class.new(timeseries: ts, start_time: Time.parse("2024-10-26"), end_time: finish)
+        range_cmd.aggregation = ["count", 86_400_000]
+        result = range_cmd.cmd
+
+        expect(bucket_labels(result).last).to eq("10-28 00:00")
+        expect(result.last.value.to_i).to eq(1)
+      end
+
+      # The window is split into several TS.RANGEs, each with its own start, end and bucket size.
+      # A raise part-way through used to leave the RangeCmd pointing at one sub-window with a
+      # 25-hour aggregation, so a caller that retried it queried the wrong range.
+      it "restores its window and bucket size when a run raises" do
+        from = Time.parse("2024-10-25")
+        to = Time.parse("2024-10-29")
+        range_cmd = described_class.new(timeseries: ts, start_time: from, end_time: to)
+        range_cmd.aggregation = ["avg", 86_400_000]
+
+        expect { range_cmd.enqueue(exploding_pipeline) }.to raise_error("boom")
+
+        expect(range_cmd.start_time).to eq(from)
+        expect(range_cmd.end_time).to eq(to)
+        expect(range_cmd.options).to include(["AGGREGATION", "avg", 86_400_000])
+      end
+
+      # Every bucket is a true 24 hours, but where the clock jumps AT midnight the label moves onto
+      # the next date and stays there — so past the transition the labels are no longer dates. Pinned
+      # so a change to the walker has to decide about it rather than drift into it.
+      context "in a zone whose spring-forward is at midnight" do
+        around { |example| in_zone("America/Santiago") { example.run } }
+
+        it "keeps 24-hour buckets but shifts the label for the rest of the window" do
+          seed_hourly(ts, Time.parse("2024-09-05"), Time.parse("2024-09-13"))
+
+          range_cmd = described_class.new(timeseries: ts,
+                                         start_time: Time.parse("2024-09-06"),
+                                         end_time: Time.parse("2024-09-11"))
+          range_cmd.aggregation = ["count", 86_400_000]
+          result = range_cmd.cmd
+
+          expect(result.map { |sample| sample.value.to_i }).to all(eq(24))
+          expect(bucket_labels(result)).to eq(["09-06 00:00", "09-07 00:00", "09-08 01:00", "09-09 01:00", "09-10 01:00"])
+        end
       end
 
       context "with filter_by_range" do
