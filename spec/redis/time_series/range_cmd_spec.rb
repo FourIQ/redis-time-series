@@ -236,7 +236,9 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
                                        end_time: Time.parse("2024-10-28"))
         range_cmd.aggregation = ["count", 86_400_000]
 
-        expect(range_cmd.cmd.map { |sample| sample.value.to_i }).to eq([24, 25])
+        # The trailing 1 is the inclusive end_time instant in its own bucket, which any window
+        # gets — a non-DST week of the same shape reads [24, 24, 1].
+        expect(range_cmd.cmd.map { |sample| sample.value.to_i }).to eq([24, 25, 1])
       end
 
       # Splitting the transition days out must not turn into one command per day: a year
@@ -338,6 +340,36 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
           expect(bucket_labels(result).first(3)).to eq(["10-06 00:00", "10-07 00:00", "10-08 01:00"])
           expect(result.map { |sample| sample.value.to_i }).to eq([24, 24, 24, 24, 24, 24, 24, 24, 25, 24, 24, 24])
         end
+      end
+
+      # An operational schedule with no opening hours configured returns the whole query as one
+      # range. Requiring a sub-range to sit inside a run dropped it at every run, so a daily read
+      # over a window containing a transition came back completely empty.
+      it "keeps a filter_by_range that spans the whole window when the window is split" do
+        seed_hourly(ts, Time.parse("2024-10-24"), Time.parse("2024-10-30"))
+        from = Time.parse("2024-10-25")
+        to = Time.parse("2024-10-29")
+
+        range_cmd = described_class.new(timeseries: ts, start_time: from, end_time: to)
+        range_cmd.aggregation = ["count", 86_400_000]
+        range_cmd.filter_by_range = [from..to]
+
+        expect(range_cmd.cmd.size).to be > 0
+      end
+
+      # A Time serialises as `to_i * 1000`, so closing a run a whole second early left a
+      # millisecond gap between one run and the next that no TS.RANGE covered.
+      it "does not lose a sample in the millisecond before a run boundary" do
+        boundary = Time.parse("2024-10-27")
+        ts.add(1.0, (boundary.to_f * 1000).to_i - 1)
+        ts.add(1.0, (boundary.to_f * 1000).to_i)
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-10-25"),
+                                       end_time: Time.parse("2024-10-29"))
+        range_cmd.aggregation = ["count", 86_400_000]
+
+        expect(range_cmd.cmd.sum { |sample| sample.value.to_f.nan? ? 0 : sample.value.to_i }).to eq(2)
       end
 
       context "with filter_by_range" do

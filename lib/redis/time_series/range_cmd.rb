@@ -314,10 +314,13 @@ class Redis
             current_end = (yield current_start) - 1
           end
 
+          queried_timestamps
+        ensure
+          # Same hazard as daily_aggregation: a raise inside the pipeline block would leave this
+          # RangeCmd pointing at one month or year, with that period's bucket size.
           @start_time = original_start_time
           @end_time = original_end_time
           @aggregation = original_aggregation
-          queried_timestamps
         end
 
         # One bucket per calendar day, counted from the window start. A Redis bucket is a fixed span of *elapsed* time, so the day a DST transition falls in is 23 or 25 hours long and every bucket after it drifts in wall-clock terms; that day is therefore asked for on its own, with its real length. Runs of ordinary 24-hour days still go out as one TS.RANGE each, so a year of daily buckets costs three commands, not 365.
@@ -355,18 +358,26 @@ class Redis
             day_duration = ((next_grid - grid) * 1000).round
 
             if day_duration != DAILY_DURATION
-              runs << [run_start, grid - 1, DAILY_DURATION] if grid > run_start
-              runs << [grid, [next_grid - 1, window_end].min, day_duration]
+              # Ends are exclusive to the millisecond, not the second: a Time serialises as
+              # `to_i * 1000`, so closing a run a whole second early loses any sample in the
+              # millisecond gap between one run's end and the next run's start.
+              runs << [run_start, msec(grid) - 1, DAILY_DURATION] if grid > run_start
+              runs << [grid, [msec(next_grid) - 1, msec(window_end)].min, day_duration]
               run_start = next_grid
             end
 
             grid = next_grid
           end
 
-          # `runs.empty?` keeps a zero-length window (from == to) enqueueing the one command it
-          # enqueued before this split existed, rather than silently returning no samples at all.
-          runs << [run_start, window_end, DAILY_DURATION] if run_start < window_end || runs.empty?
+          # `<=` covers a window ending exactly on a boundary, whose final instant would otherwise
+          # fall outside every run; `runs.empty?` keeps a zero-length window (from == to) enqueueing
+          # the one command it enqueued before this split existed.
+          runs << [run_start, window_end, DAILY_DURATION] if run_start <= window_end || runs.empty?
           runs
+        end
+
+        def msec(time)
+          (time.to_f * 1000).round
         end
 
         # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
@@ -374,8 +385,11 @@ class Redis
         # A time of day the clock skips does not exist on the transition day, so the step stays a
         # plain 24 elapsed hours and the label moves instead. Where the skipped span crosses
         # midnight (Europe/Bucharest 1980-04-05, Asia/Pyongyang 2018-05-04) the label moves onto the
-        # next date and that calendar day gets no bucket at all — no data is lost, the bucket either
-        # side is a true 24 hours, but a caller drawing one bar per day draws one fewer that year.
+        # next date and that calendar day gets no bucket at all. Worse, the shift is permanent for the
+        # rest of the query: in a zone whose spring-forward is at midnight (Asia/Beirut, America/
+        # Santiago, America/Sao_Paulo) every later bucket is labelled an hour in and spans an hour of
+        # the following calendar day, so "one bucket per calendar day" stops holding after it. No
+        # data is lost — every bucket is a true 24 hours — but the labels are no longer dates.
         def next_day_boundary(grid)
           elapsed_day = grid + 86_400
           return elapsed_day if elapsed_day.utc_offset == grid.utc_offset
@@ -396,20 +410,33 @@ class Redis
         # TS.RANGE only accepts up to 128 timestamps in FILTER_BY_TS, and FILTER_BY_RANGE is not a native Redis TimeSeries feature.
         # We implement both by emitting one TS.RANGE per slice/range and concatenating the replies on read.
 
+        # Sub-ranges are CLIPPED to the window rather than selected for being inside it. Requiring
+        # containment dropped a range that straddled the window's edge entirely, and daily
+        # aggregation splits the window at every transition day, so a schedule covering the whole
+        # query — which is what an unconfigured operational schedule produces — matched no run at
+        # all and returned empty Samples for the entire read.
         def enqueue_filtered_by_range(pipeline)
           original_start_time = @start_time
           original_end_time = @end_time
-          window = original_start_time..original_end_time
-          sub_ranges = filter_by_range.select { |r| window.cover?(r) }
+          window = start_time..end_time
 
           @align = original_start_time
-          sub_ranges.each do |sub_range|
+          clipped_ranges(window).each do |sub_range|
             @start_time = sub_range.begin
             @end_time = sub_range.end
             @timeseries.range_cmd(self, pipeline: pipeline)
           end
+        ensure
           @start_time = original_start_time
           @end_time = original_end_time
+        end
+
+        def clipped_ranges(window)
+          filter_by_range.filter_map do |sub_range|
+            from = [sub_range.begin, window.begin].max
+            to = [sub_range.end, window.end].min
+            (from..to) if from <= to
+          end
         end
 
         def enqueue_filtered_by_ts(pipeline)
