@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.8.15
 * Require redis-rb >= 5. The gem already called redis-rb 5 APIs and referenced `RedisClient` unguarded, so the declared `>= 3.3` was never a working configuration; the redis 3 and redis 4 appraisals go with it.
 
 ## 0.8.14
