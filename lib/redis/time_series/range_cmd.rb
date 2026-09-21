@@ -34,13 +34,17 @@ class Redis
       # ─── 2. Configuration (chainable) ─────────────────────────────────
 
       # Calendar slicing reasons about wall-clock boundaries — beginning_of_year, beginning_of_day, a
-      # DST transition — so these have to resolve in the zone the CALLER thinks in. See #zone_at.
+      # DST transition — so these have to resolve in the zone the CALLER thinks in. See CalendarZone.
+      #
+      # `/ 1000.0`, not `/ 1000`: a run boundary is a millisecond value (`msec(grid) - 1`), and
+      # integer division rounded it down to the whole second, so filter_by_range clipped a
+      # sub-range a second short and nothing covered the last 999 ms of the run.
       def start_time
-        CalendarZone.at(@start_time.is_a?(Numeric) ? @start_time / 1000 : @start_time)
+        CalendarZone.at(@start_time.is_a?(Numeric) ? @start_time / 1000.0 : @start_time)
       end
 
       def end_time
-        CalendarZone.at(@end_time.is_a?(Numeric) ? @end_time / 1000 : @end_time)
+        CalendarZone.at(@end_time.is_a?(Numeric) ? @end_time / 1000.0 : @end_time)
       end
 
       def aggregation=(aggregation)
@@ -369,9 +373,10 @@ class Redis
             grid = next_grid
           end
 
-          # `<=` covers a window ending exactly on a boundary, whose final instant would otherwise
-          # fall outside every run; `runs.empty?` keeps a zero-length window (from == to) enqueueing
-          # the one command it enqueued before this split existed.
+          # `<=` covers a window ending exactly on a boundary — including a zero-length one
+          # (from == to) — whose final instant would otherwise fall outside every run. `runs.empty?`
+          # is for an INVERTED window (from > to), where the walk never runs and run_start is
+          # already past the end: the loop this replaced always enqueued once, so it still does.
           runs << [run_start, window_end, DAILY_DURATION] if run_start <= window_end || runs.empty?
           runs
         end
@@ -415,20 +420,35 @@ class Redis
         # aggregation splits the window at every transition day, so a schedule covering the whole
         # query — which is what an unconfigured operational schedule produces — matched no run at
         # all and returned empty Samples for the entire read.
+        #
+        # ⚠️ One command per sub-range, so a bucket holding two disjoint sub-ranges gets two rows at
+        # the SAME timestamp, each aggregating its own part. Reachable only when the day grid does
+        # not start at local midnight and a sub-range therefore straddles a run boundary; every
+        # Daterange preset starts at midnight, which is why no consumer sees it today. The rows sum
+        # correctly, so `count`/`sum` is safe, but two partial `avg`s cannot be recombined — a
+        # caller that starts a daily read off-midnight AND filters by range has to decide what it
+        # wants. Redis cannot aggregate two disjoint intervals in one TS.RANGE, so the alternative
+        # is dropping one of them, which is the data loss this clipping exists to fix.
         def enqueue_filtered_by_range(pipeline)
           original_start_time = @start_time
           original_end_time = @end_time
           window = start_time..end_time
 
+          original_align = @align
+
           @align = original_start_time
           clipped_ranges(window).each do |sub_range|
-            @start_time = sub_range.begin
-            @end_time = sub_range.end
+            # Milliseconds, not the Time itself: Client#cmd_with_redis serialises a Time as
+            # `to_i * 1000`, which would throw away the sub-second part of a bound clipped to a run
+            # boundary — the same 999 ms the run split itself is careful to keep.
+            @start_time = msec(sub_range.begin)
+            @end_time = msec(sub_range.end)
             @timeseries.range_cmd(self, pipeline: pipeline)
           end
         ensure
           @start_time = original_start_time
           @end_time = original_end_time
+          @align = original_align
         end
 
         def clipped_ranges(window)

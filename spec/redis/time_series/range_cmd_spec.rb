@@ -417,6 +417,46 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         expect(range_cmd.cmd.sum { |sample| sample.value.to_f.nan? ? 0 : sample.value.to_i }).to eq(2)
       end
 
+      # The same millisecond, through filter_by_range. Two layers threw it away independently: the
+      # `start_time`/`end_time` readers floored a millisecond bound to the whole second, so the clip
+      # landed a second early, and Client#cmd_with_redis serialises a Time as `to_i * 1000`, so
+      # passing the clipped bound on as a Time truncated it again.
+      it "does not lose that millisecond when the read is filtered by range" do
+        from = Time.parse("2024-10-25")
+        to = Time.parse("2024-10-29")
+        boundary = Time.parse("2024-10-27")
+        [-1, 0, 1].each { |offset| ts.add(1.0, (boundary.to_f * 1000).to_i + offset) }
+
+        range_cmd = described_class.new(timeseries: ts, start_time: from, end_time: to)
+        range_cmd.aggregation = ["count", 86_400_000]
+        range_cmd.filter_by_range = [from..to]
+
+        expect(range_cmd.cmd.sum { |sample| sample.value.to_f.nan? ? 0 : sample.value.to_i }).to eq(3)
+      end
+
+      # A sub-range that straddles a run boundary becomes two clipped sub-ranges, hence two rows at
+      # one bucket's timestamp, each aggregating its own part. Pinned so the next editor meets the
+      # trade-off deliberately: the rows sum correctly, but two partial `avg`s cannot be recombined,
+      # and the alternative is dropping one interval, which is the loss the clipping removed.
+      it "splits a sub-range that straddles a run boundary into two rows for one bucket" do
+        seed_hourly(ts, Time.parse("2024-10-24"), Time.parse("2024-10-31"))
+        # 08:00-16:00 straddles a grid that starts at 14:37.
+        days = (25..29).map { |day| Time.parse("2024-10-#{day} 08:00")..Time.parse("2024-10-#{day} 16:00") }
+
+        range_cmd = described_class.new(timeseries: ts,
+                                       start_time: Time.parse("2024-10-25 14:37"),
+                                       end_time: Time.parse("2024-10-30 14:37"))
+        range_cmd.aggregation = ["count", 86_400_000]
+        range_cmd.filter_by_range = days
+        rows = range_cmd.cmd.reject { |sample| sample.value.to_f.nan? }
+        stamps = rows.map(&:ts_msec)
+
+        expect(stamps.size).to be > stamps.uniq.size
+        # Nothing is lost or double-counted: 9 hourly samples in each full 08:00-16:00 window, and
+        # 2 in the first, which the query's own 14:37 start clips.
+        expect(rows.sum { |sample| sample.value.to_i }).to eq(2 + (9 * 4))
+      end
+
       # The window ends on a day boundary, so the final instant falls outside the transition run.
       # It used to be dropped, while the same window in a week with no transition kept it.
       it "keeps a sample sitting exactly on the window end" do
