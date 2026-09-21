@@ -10,6 +10,9 @@
 * ⚠️ `filter_by_range` emits one command per sub-range, so a bucket holding two disjoint sub-ranges returns two rows at the same timestamp, each aggregating its own part. Only reachable when the day grid does not start at local midnight; the rows sum correctly, so `count`/`sum` is safe, but two partial `avg`s cannot be recombined. Redis cannot aggregate two disjoint intervals in one `TS.RANGE`, and the alternative is dropping one of them — the data loss this clipping removes.
 * ⚠️ Calendar buckets now follow the **application's** `Time.zone`, not the process zone. A consumer that does not set `config.time_zone` gets Rails' `"UTC"` default, so its day/month/year boundaries move from the process zone to UTC — set `config.time_zone` explicitly if calendar aggregation matters.
 
+## 0.8.15
+* Require redis-rb >= 5. The gem already called redis-rb 5 APIs and referenced `RedisClient` unguarded, so the declared `>= 3.3` was never a working configuration; the redis 3 and redis 4 appraisals go with it.
+
 ## 0.8.14
 * `TS.DEL` against a series that does not exist returns 0 instead of raising — deleting a range that holds nothing is a no-op, so callers no longer have to probe for the key first. Any other command error still raises.
 * `MISSING_KEY_MESSAGE` moves up to `Redis::TimeSeries`, shared with the `RangeCmd` missing-key handling.
