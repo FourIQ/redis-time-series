@@ -7,6 +7,7 @@ require 'active_support/core_ext/numeric/time'
 require 'active_support/testing/time_helpers'
 require 'pry'
 require 'redis'
+require 'timeout'
 require 'redis-time-series'
 
 REDIS_PORT = ENV['REDIS_PORT'] || 9000
@@ -14,6 +15,17 @@ REDIS_HOST = ENV['REDIS_HOST'] || '127.0.0.1'
 # nil (not "") when unset: redis-client sends AUTH for any non-nil password,
 # which errors against a passwordless Redis.
 REDIS_PASSWORD = ENV['REDIS_PASSWORD'].to_s.empty? ? nil : ENV['REDIS_PASSWORD']
+
+# DST behaviour can only be exercised in a zone that observes it, and CI runs UTC.
+module ZoneHelpers
+  def in_zone(zone)
+    original = ENV["TZ"]
+    ENV["TZ"] = zone
+    yield
+  ensure
+    ENV["TZ"] = original
+  end
+end
 
 module RedisHelpers
   def redis
@@ -31,6 +43,7 @@ RSpec.configure do |config|
   end
 
   config.include RedisHelpers
+  config.include ZoneHelpers
   config.include ActiveSupport::Testing::TimeHelpers
 
   #config.before(:suite) { Redis.new.flushdb }
