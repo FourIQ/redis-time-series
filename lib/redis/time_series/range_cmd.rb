@@ -36,9 +36,8 @@ class Redis
       # Calendar slicing reasons about wall-clock boundaries — beginning_of_year, beginning_of_day, a
       # DST transition — so these have to resolve in the zone the CALLER thinks in. See CalendarZone.
       #
-      # `/ 1000.0`, not `/ 1000`: a run boundary is a millisecond value (`msec(grid) - 1`), and
-      # integer division rounded it down to the whole second, so filter_by_range clipped a
-      # sub-range a second short and nothing covered the last 999 ms of the run.
+      # `/ 1000.0`, not `/ 1000`: integer division floors a run boundary (`msec(grid) - 1`) to the
+      # whole second, losing the 999 ms between it and the next run.
       def start_time
         CalendarZone.at(@start_time.is_a?(Numeric) ? @start_time / 1000.0 : @start_time)
       end
@@ -298,62 +297,51 @@ class Redis
         #
         # Requires `pipeline` to be a CountingPipeline — see enqueue.
         def calendar_aggregation_loop(pipeline, initial_start:, advance_by:)
-          original_start_time = @start_time
-          original_end_time = @end_time
-          original_aggregation = @aggregation
+          # `end_time`, not @end_time: Time#<=> hands a millisecond Integer on to Date#<=>, which
+          # reads it as a Julian day number — a date the cursor never reaches, and the loop spins.
+          window_end = end_time
           queried_timestamps = []
 
-          current_start = initial_start
-          current_end = (yield current_start) - 1
-          while current_end < original_end_time
-            self.aggregation = [@aggregation.type, ((current_end - current_start).round) * 1000]
-            @start_time = current_start
-            @end_time = current_end
-
-            before = pipeline.count
-            enqueue_window(pipeline)
-            (pipeline.count - before).times { queried_timestamps << current_start.to_i * 1000 }
-
-            current_start = current_start.advance(advance_by => 1)
+          preserving_state do
+            current_start = initial_start
             current_end = (yield current_start) - 1
+            while current_end < window_end
+              self.aggregation = [@aggregation.type, ((current_end - current_start).round) * 1000]
+              @start_time = current_start
+              @end_time = current_end
+
+              before = pipeline.count
+              enqueue_window(pipeline)
+              (pipeline.count - before).times { queried_timestamps << current_start.to_i * 1000 }
+
+              current_start = current_start.advance(advance_by => 1)
+              current_end = (yield current_start) - 1
+            end
           end
 
           queried_timestamps
-        ensure
-          # Same hazard as daily_aggregation: a raise inside the pipeline block would leave this
-          # RangeCmd pointing at one month or year, with that period's bucket size.
-          @start_time = original_start_time
-          @end_time = original_end_time
-          @aggregation = original_aggregation
         end
 
         # One bucket per calendar day, counted from the window start. A Redis bucket is a fixed span of *elapsed* time, so the day a DST transition falls in is 23 or 25 hours long and every bucket after it drifts in wall-clock terms; that day is therefore asked for on its own, with its real length. Runs of ordinary 24-hour days still go out as one TS.RANGE each, so a year of daily buckets costs three commands, not 365.
         # Returns [] to match calendar_aggregation_loop's signature — daily replies carry per-bucket timestamps already, so no queried_timestamps tracking is needed.
         def daily_aggregation(pipeline)
-          original_start_time = @start_time
-          original_end_time = @end_time
-          original_aggregation = @aggregation
+          type = @aggregation.type
 
-          day_runs.each do |run_start, run_end, bucket_duration|
-            self.aggregation = [original_aggregation.type, bucket_duration]
-            @start_time = run_start
-            @end_time = run_end
-            enqueue_window(pipeline)
+          preserving_state do
+            day_runs.each do |run_start, run_end, bucket_duration|
+              self.aggregation = [type, bucket_duration]
+              @start_time = run_start
+              @end_time = run_end
+              enqueue_window(pipeline)
+            end
           end
+
           []
-        ensure
-          # A raise inside the pipeline block would otherwise leave this RangeCmd pointing at one
-          # sub-window with a 25-hour aggregation, and a caller that retries it queries the wrong range.
-          @start_time = original_start_time
-          @end_time = original_end_time
-          @aggregation = original_aggregation
         end
 
-        # Splits the window into consecutive [start_ms, end_ms, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Days sit a fixed 86_400 seconds apart except where the clock moves, so the walk itself is plain Time arithmetic — one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
+        # Splits the window into consecutive [start_ms, end_ms, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length.
         #
-        # Both bounds leave here as MILLISECONDS. Handing a Time on to the command would serialise it `to_i * 1000` (see Client#cmd_with_redis), and a grid that carries a fractional second closes each run at an exact `.499` while the next run would reopen at `.000` — the samples in between land in two commands and are counted twice.
-        #
-        # Deliberately not strided. Skipping ahead and comparing the offsets at the two ends of a stride cannot see a pair of transitions inside it whose offsets cancel, and tzdata carries 15 such pairs closer than a fortnight -- the tightest America/Cambridge_Bay, 6.92 days in 2000. Where that happens the stride is skipped whole and NO transition is found, which is silently the behaviour this change exists to remove.
+        # Deliberately not strided. Skipping ahead and comparing the offsets at the two ends of a stride cannot see a pair of transitions inside it whose offsets cancel, and tzdata carries 15 such pairs closer than a fortnight — the tightest America/Cambridge_Bay, 6.92 days in 2000. The stride is then skipped whole and NO transition is found, which is silently the behaviour this change exists to remove.
         def day_runs
           window_end = end_time
           runs = []
@@ -382,20 +370,19 @@ class Redis
           runs
         end
 
-        def msec(time)
-          (time.to_f * 1000).round
+        # Milliseconds, from either form a bound arrives in — a Time, or the millisecond Integer
+        # RangeCmd also accepts. Bounds go to Redis in this form and never as a Time, which
+        # Client#cmd_with_redis would serialise `to_i * 1000` and round away the run boundary.
+        def msec(value)
+          value.is_a?(Numeric) ? value.round : (value.to_f * 1000).round
         end
 
         # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
         #
-        # A time of day the clock skips does not exist on the transition day, so the step stays a
-        # plain 24 elapsed hours and the label moves instead. Where the skipped span crosses
-        # midnight (Europe/Bucharest 1980-04-05, Asia/Pyongyang 2018-05-04) the label moves onto the
-        # next date and that calendar day gets no bucket at all. Worse, the shift is permanent for the
-        # rest of the query: in a zone whose spring-forward is at midnight (Asia/Beirut, America/
-        # Santiago, America/Sao_Paulo) every later bucket is labelled an hour in and spans an hour of
-        # the following calendar day, so "one bucket per calendar day" stops holding after it. No
-        # data is lost — every bucket is a true 24 hours — but the labels are no longer dates.
+        # Where the clock jumps AT midnight (Asia/Beirut, America/Santiago, America/Sao_Paulo) the
+        # label moves onto the next date and STAYS there — that calendar day gets no bucket, and past
+        # the transition the labels are no longer dates. No data is lost, every bucket is a true 24
+        # hours, but a caller reading the timestamps as calendar days is reading them wrong.
         def next_day_boundary(grid)
           elapsed_day = grid + 86_400
           return elapsed_day if elapsed_day.utc_offset == grid.utc_offset
@@ -416,66 +403,56 @@ class Redis
         # TS.RANGE only accepts up to 128 timestamps in FILTER_BY_TS, and FILTER_BY_RANGE is not a native Redis TimeSeries feature.
         # We implement both by emitting one TS.RANGE per slice/range and concatenating the replies on read.
 
-        # Sub-ranges are CLIPPED to the window rather than selected for being inside it. Requiring
-        # containment dropped a range that straddled the window's edge entirely, and daily
-        # aggregation splits the window at every transition day, so a schedule covering the whole
-        # query — which is what an unconfigured operational schedule produces — matched no run at
-        # all and returned empty Samples for the entire read.
-        #
-        # ⚠️ One command per sub-range, so a bucket holding two disjoint sub-ranges gets two rows at
-        # the SAME timestamp, each aggregating its own part. Reachable only when the day grid does
-        # not start at local midnight and a sub-range therefore straddles a run boundary; every
-        # Daterange preset starts at midnight, which is why no consumer sees it today. The rows sum
-        # correctly, so `count`/`sum` is safe, but two partial `avg`s cannot be recombined — a
-        # caller that starts a daily read off-midnight AND filters by range has to decide what it
-        # wants. Redis cannot aggregate two disjoint intervals in one TS.RANGE, so the alternative
-        # is dropping one of them, which is the data loss this clipping exists to fix.
+        # Sub-ranges are CLIPPED to the window, not selected for sitting inside it. Requiring
+        # containment dropped a range straddling the window's edge entirely, and daily aggregation
+        # splits the window at every transition day — so a schedule covering the whole query, which
+        # is what an UNCONFIGURED operational schedule produces, matched no run and returned empty
+        # Samples for the entire read.
         def enqueue_filtered_by_range(pipeline)
-          original_start_time = @start_time
-          original_end_time = @end_time
-          window = start_time..end_time
-
-          original_align = @align
-
-          @align = original_start_time
-          clipped_ranges(window).each do |sub_range|
-            # Milliseconds, not the Time itself: Client#cmd_with_redis serialises a Time as
-            # `to_i * 1000`, which would throw away the sub-second part of a bound clipped to a run
-            # boundary — the same 999 ms the run split itself is careful to keep.
-            @start_time = msec(sub_range.begin)
-            @end_time = msec(sub_range.end)
-            @timeseries.range_cmd(self, pipeline: pipeline)
+          preserving_state do
+            @align = @start_time
+            clipped_ranges.each do |sub_range|
+              @start_time = sub_range.begin
+              @end_time = sub_range.end
+              @timeseries.range_cmd(self, pipeline: pipeline)
+            end
           end
-        ensure
-          @start_time = original_start_time
-          @end_time = original_end_time
-          @align = original_align
         end
 
-        # Sub-range bounds are normalised first: `RangeCmd` accepts millisecond Integers for the
-        # window, so a caller working in milliseconds throughout hands filter_by_range Integers too,
-        # and clipping them against the Time-valued window raised `comparison of Integer with Time
-        # failed`. The containment check this replaced compared them raw, which worked for an
-        # all-numeric caller and silently matched nothing for a mixed one.
-        def clipped_ranges(window)
+        # ⚠️ One command per sub-range, so a bucket holding two disjoint sub-ranges gets two rows at
+        # the SAME timestamp, each aggregating its own part — `count`/`sum` still add up, two partial
+        # `avg`s cannot be recombined. Redis cannot aggregate two disjoint intervals in one TS.RANGE
+        # and the alternative is dropping one, which is the data loss this clipping exists to fix.
+        # Pinned by a spec; only reachable off a midnight-aligned day grid, which no consumer uses.
+        def clipped_ranges
+          window_from = msec(start_time)
+          window_to = msec(end_time)
+
           filter_by_range.filter_map do |sub_range|
-            from = [timestamp(sub_range.begin), window.begin].max
-            to = [timestamp(sub_range.end), window.end].min
+            from = [msec(sub_range.begin), window_from].max
+            to = [msec(sub_range.end), window_to].min
             (from..to) if from <= to
           end
         end
 
-        def timestamp(value)
-          value.is_a?(Numeric) ? CalendarZone.at(value / 1000.0) : value
+        def enqueue_filtered_by_ts(pipeline)
+          preserving_state do
+            @filter_by_ts.each_slice(FILTER_BY_TS_LIMIT) do |slice|
+              @filter_by_ts = slice
+              @timeseries.range_cmd(self, pipeline: pipeline)
+            end
+          end
         end
 
-        def enqueue_filtered_by_ts(pipeline)
-          original_filter_by_ts = @filter_by_ts
-          original_filter_by_ts.each_slice(FILTER_BY_TS_LIMIT) do |slice|
-            @filter_by_ts = slice
-            @timeseries.range_cmd(self, pipeline: pipeline)
-          end
-          @filter_by_ts = original_filter_by_ts
+        # Every slicing path above narrows this RangeCmd's own state per emitted command. Restore it
+        # on the way out, a raise inside the pipeline block included — otherwise the RangeCmd is left
+        # pointing at one sub-window, with that sub-window's bucket size, and a caller that retries it
+        # queries the wrong range.
+        def preserving_state
+          saved = [@start_time, @end_time, @aggregation, @align, @filter_by_ts]
+          yield
+        ensure
+          @start_time, @end_time, @aggregation, @align, @filter_by_ts = saved
         end
     end
   end

@@ -28,6 +28,15 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
   end
 
   describe "#cmd" do
+    def counting_pipeline
+      Class.new do
+        attr_reader :count
+
+        def initialize = @count = 0
+        def call(_name, _args) = @count += 1
+      end.new
+    end
+
     # Fails part-way through a multi-command enqueue, the way a dropped connection would.
     def exploding_pipeline
       Class.new do
@@ -185,6 +194,54 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         expect(range_cmd.end_time).to eq(to)
         expect(range_cmd.options).to include(["AGGREGATION", "avg", 2_629_746_000])
       end
+
+      # A window given in milliseconds, which RangeCmd accepts throughout, used to be compared
+      # against a Time in the loop condition — Time#<=> hands an Integer to Date#<=>, which reads it
+      # as a Julian day number, so the condition was always true and the loop spun forever inside
+      # the Redis pipeline block, holding its connection.
+      it "ends the loop for a window given in milliseconds" do
+        from = Time.parse("2024-01-01")
+        to = Time.parse("2024-04-01")
+        ts.madd({ Time.parse("2024-01-15") => 10, Time.parse("2024-02-15") => 20 })
+        as_msec = ->(time) { time.to_i * 1000 }
+
+        numeric = described_class.new(timeseries: ts, start_time: as_msec.(from), end_time: as_msec.(to))
+        numeric.aggregation = ["avg", 2_629_746_000]
+        times = described_class.new(timeseries: ts, start_time: from, end_time: to)
+        times.aggregation = ["avg", 2_629_746_000]
+
+        result = Timeout.timeout(15) { numeric.cmd }
+
+        expect(result.map { |sample| [sample.ts_msec, sample.value.to_s] })
+          .to eq(times.cmd.map { |sample| [sample.ts_msec, sample.value.to_s] })
+      end
+    end
+
+    # FILTER_BY_TS is sliced into 128-timestamp chunks, one command each, with @filter_by_ts
+    # narrowed to the chunk in flight — the same leak the calendar paths had, and a caller that
+    # retries after a dropped connection would then filter on one chunk of its timestamps.
+    it "restores its filter_by_ts when a slice raises" do
+      timestamps = (1..300).to_a
+      range_cmd = described_class.new(timeseries: ts, start_time: Time.parse("2024-01-01"), end_time: Time.parse("2024-02-01"))
+      range_cmd.filter_by_ts = timestamps
+
+      expect { range_cmd.enqueue(exploding_pipeline) }.to raise_error("boom")
+
+      expect(range_cmd.filter_by_ts).to eq(timestamps)
+    end
+
+    # enqueue_filtered_by_range points ALIGN at the window start for the duration of the slicing and
+    # puts it back afterwards. Clipping the sub-ranges raises on the unbounded "-"/"+" default
+    # window, which is before the restore had captured the old value — so the RangeCmd came out of
+    # the failed call with no ALIGN at all, and the next query aligned on nothing.
+    it "restores its align when clipping the sub-ranges raises" do
+      range_cmd = described_class.new(timeseries: ts)
+      range_cmd.aggregation = ["avg", 3_600_000]
+      range_cmd.filter_by_range = [Time.parse("2024-01-01")..Time.parse("2024-01-02")]
+
+      expect { range_cmd.cmd }.to raise_error(TypeError)
+
+      expect(range_cmd.align).to eq("start")
     end
 
     context "with an aggregation duration of 1.day" do
@@ -270,20 +327,15 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       # Splitting the transition days out must not turn into one command per day: a year
       # of daily buckets is two odd days plus the ordinary stretches between them.
       it "issues one command per run of ordinary days, not one per day" do
-        counting_pipeline = Class.new do
-          attr_reader :count
-
-          def initialize = @count = 0
-          def call(_name, _args) = @count += 1
-        end.new
+        pipeline = counting_pipeline
 
         range_cmd = described_class.new(timeseries: ts,
                                        start_time: Time.parse("2024-01-01 06:30"),
                                        end_time: Time.parse("2024-12-31 06:30"))
         range_cmd.aggregation = ["avg", 86_400_000]
-        range_cmd.enqueue(counting_pipeline)
+        range_cmd.enqueue(pipeline)
 
-        expect(counting_pipeline.count).to eq(5)
+        expect(pipeline.count).to eq(5)
       end
 
       # Each of the four below is a zone or a window the walker used to get wrong; all reproduced
@@ -309,20 +361,15 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       # A zero-length window enqueued one command before the window was ever split into runs, and
       # a caller asking for a single instant should still get its bucket rather than empty Samples.
       it "still enqueues one command for a zero-length window" do
-        counting_pipeline = Class.new do
-          attr_reader :count
-
-          def initialize = @count = 0
-          def call(_name, _args) = @count += 1
-        end.new
+        pipeline = counting_pipeline
 
         range_cmd = described_class.new(timeseries: ts,
                                        start_time: Time.parse("2024-06-01"),
                                        end_time: Time.parse("2024-06-01"))
         range_cmd.aggregation = ["avg", 86_400_000]
-        range_cmd.enqueue(counting_pipeline)
+        range_cmd.enqueue(pipeline)
 
-        expect(counting_pipeline.count).to eq(1)
+        expect(pipeline.count).to eq(1)
       end
 
       context "in a zone whose offset moves by a whole day" do
@@ -434,10 +481,6 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         expect(range_cmd.cmd.sum { |sample| sample.value.to_f.nan? ? 0 : sample.value.to_i }).to eq(3)
       end
 
-      # A sub-range that straddles a run boundary becomes two clipped sub-ranges, hence two rows at
-      # one bucket's timestamp, each aggregating its own part. Pinned so the next editor meets the
-      # trade-off deliberately: the rows sum correctly, but two partial `avg`s cannot be recombined,
-      # and the alternative is dropping one interval, which is the loss the clipping removed.
       # A run closes at `msec(grid) - 1`, so the next one has to open at exactly `msec(grid)`.
       # Handed on as a Time it was serialised `to_i * 1000`, reopening the run at the top of the
       # second: with a grid carrying a fractional second the two commands overlapped by up to 999 ms
@@ -481,6 +524,9 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
           .to eq(times.cmd.map { |sample| [sample.ts_msec, sample.value.to_s] })
       end
 
+      # Pinned so the next editor meets the trade-off deliberately: the rows sum correctly, but two
+      # partial `avg`s cannot be recombined, and the alternative is dropping one of the two
+      # intervals, which is the data loss the clipping removed.
       it "splits a sub-range that straddles a run boundary into two rows for one bucket" do
         seed_hourly(ts, Time.parse("2024-10-24"), Time.parse("2024-10-31"))
         # 08:00-16:00 straddles a grid that starts at 14:37.
