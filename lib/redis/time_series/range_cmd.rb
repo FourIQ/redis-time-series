@@ -349,7 +349,9 @@ class Redis
           @aggregation = original_aggregation
         end
 
-        # Splits the window into consecutive [start, end, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Days sit a fixed 86_400 seconds apart except where the clock moves, so this is plain Time arithmetic — one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
+        # Splits the window into consecutive [start_ms, end_ms, bucket_duration_ms] runs: stretches of ordinary 24-hour days, and each transition day on its own with its real length. Days sit a fixed 86_400 seconds apart except where the clock moves, so the walk itself is plain Time arithmetic — one addition and an offset comparison per day, no ActiveSupport and no zone lookup.
+        #
+        # Both bounds leave here as MILLISECONDS. Handing a Time on to the command would serialise it `to_i * 1000` (see Client#cmd_with_redis), and a grid that carries a fractional second closes each run at an exact `.499` while the next run would reopen at `.000` — the samples in between land in two commands and are counted twice.
         #
         # Deliberately not strided. Skipping ahead and comparing the offsets at the two ends of a stride cannot see a pair of transitions inside it whose offsets cancel, and tzdata carries 15 such pairs closer than a fortnight -- the tightest America/Cambridge_Bay, 6.92 days in 2000. Where that happens the stride is skipped whole and NO transition is found, which is silently the behaviour this change exists to remove.
         def day_runs
@@ -362,11 +364,10 @@ class Redis
             day_duration = ((next_grid - grid) * 1000).round
 
             if day_duration != DAILY_DURATION
-              # Ends are exclusive to the millisecond, not the second: a Time serialises as
-              # `to_i * 1000`, so closing a run a whole second early loses any sample in the
-              # millisecond gap between one run's end and the next run's start.
-              runs << [run_start, msec(grid) - 1, DAILY_DURATION] if grid > run_start
-              runs << [grid, [msec(next_grid) - 1, msec(window_end)].min, day_duration]
+              # A run ends one millisecond before the next one starts. Closing it a whole second
+              # early would lose every sample in between; closing it exactly makes the two runs meet.
+              runs << [msec(run_start), msec(grid) - 1, DAILY_DURATION] if grid > run_start
+              runs << [msec(grid), [msec(next_grid) - 1, msec(window_end)].min, day_duration]
               run_start = next_grid
             end
 
@@ -377,7 +378,7 @@ class Redis
           # (from == to) — whose final instant would otherwise fall outside every run. `runs.empty?`
           # is for an INVERTED window (from > to), where the walk never runs and run_start is
           # already past the end: the loop this replaced always enqueued once, so it still does.
-          runs << [run_start, window_end, DAILY_DURATION] if run_start <= window_end || runs.empty?
+          runs << [msec(run_start), msec(window_end), DAILY_DURATION] if run_start <= window_end || runs.empty?
           runs
         end
 
@@ -451,12 +452,21 @@ class Redis
           @align = original_align
         end
 
+        # Sub-range bounds are normalised first: `RangeCmd` accepts millisecond Integers for the
+        # window, so a caller working in milliseconds throughout hands filter_by_range Integers too,
+        # and clipping them against the Time-valued window raised `comparison of Integer with Time
+        # failed`. The containment check this replaced compared them raw, which worked for an
+        # all-numeric caller and silently matched nothing for a mixed one.
         def clipped_ranges(window)
           filter_by_range.filter_map do |sub_range|
-            from = [sub_range.begin, window.begin].max
-            to = [sub_range.end, window.end].min
+            from = [timestamp(sub_range.begin), window.begin].max
+            to = [timestamp(sub_range.end), window.end].min
             (from..to) if from <= to
           end
+        end
+
+        def timestamp(value)
+          value.is_a?(Numeric) ? CalendarZone.at(value / 1000.0) : value
         end
 
         def enqueue_filtered_by_ts(pipeline)

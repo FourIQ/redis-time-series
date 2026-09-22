@@ -438,6 +438,49 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       # one bucket's timestamp, each aggregating its own part. Pinned so the next editor meets the
       # trade-off deliberately: the rows sum correctly, but two partial `avg`s cannot be recombined,
       # and the alternative is dropping one interval, which is the loss the clipping removed.
+      # A run closes at `msec(grid) - 1`, so the next one has to open at exactly `msec(grid)`.
+      # Handed on as a Time it was serialised `to_i * 1000`, reopening the run at the top of the
+      # second: with a grid carrying a fractional second the two commands overlapped by up to 999 ms
+      # and every sample in that gap was returned by both. Two samples came back counted as four.
+      it "does not count a sample twice when the window starts mid-second" do
+        start_time = Time.at(Time.parse("2024-10-25 14:37:00").to_f + 0.5)
+        end_time = Time.at(Time.parse("2024-10-29 14:37:00").to_f + 0.5)
+        # One sample inside each run boundary's overlap window (<second>.200).
+        [Time.parse("2024-10-26 14:37:00"), Time.parse("2024-10-27 14:37:00")].each do |boundary|
+          ts.add(1.0, (boundary.to_f * 1000).to_i + 200)
+        end
+
+        range_cmd = described_class.new(timeseries: ts, start_time: start_time, end_time: end_time)
+        range_cmd.aggregation = ["count", 86_400_000]
+        rows = range_cmd.cmd.reject { |sample| sample.value.to_f.nan? }
+
+        expect(rows.sum { |sample| sample.value.to_i }).to eq(2)
+        expect(rows.map(&:ts_msec).uniq.size).to eq(rows.size)
+      end
+
+      # The window accepts millisecond Integers, so a caller working in milliseconds hands
+      # filter_by_range Integers too. Clipping compares the two, and against the Time-valued window
+      # that raised `comparison of Integer with Time failed` — where the containment check it
+      # replaced had compared them raw and worked.
+      it "clips a filter_by_range given in milliseconds, to the same answer as Times" do
+        from = Time.parse("2024-10-25")
+        to = Time.parse("2024-10-29")
+        seed_hourly(ts, Time.parse("2024-10-24"), Time.parse("2024-10-30"))
+        as_msec = ->(time) { (time.to_f * 1000).to_i }
+
+        numeric = described_class.new(timeseries: ts, start_time: as_msec.(from), end_time: as_msec.(to))
+        numeric.aggregation = ["count", 86_400_000]
+        numeric.filter_by_range = [as_msec.(from)..as_msec.(to)]
+
+        times = described_class.new(timeseries: ts, start_time: from, end_time: to)
+        times.aggregation = ["count", 86_400_000]
+        times.filter_by_range = [from..to]
+
+        expect { numeric.cmd }.not_to raise_error
+        expect(numeric.cmd.map { |sample| [sample.ts_msec, sample.value.to_s] })
+          .to eq(times.cmd.map { |sample| [sample.ts_msec, sample.value.to_s] })
+      end
+
       it "splits a sub-range that straddles a run boundary into two rows for one bucket" do
         seed_hourly(ts, Time.parse("2024-10-24"), Time.parse("2024-10-31"))
         # 08:00-16:00 straddles a grid that starts at 14:37.
