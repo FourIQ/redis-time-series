@@ -56,11 +56,7 @@ class Redis
       end
 
       def options
-        options = []
-        options << @start_time
-        options << @end_time
-        options << ["FILTER_BY_TS", @filter_by_ts] if @filter_by_ts
-        options << ["FILTER_BY_VALUE", @filter_by_value] if @filter_by_value
+        options = window_args
         # ALIGN only applies in combination with aggregation.
         options << ["ALIGN", @align] if @aggregation
         options << ["COUNT", @count] if @count
@@ -198,7 +194,7 @@ class Redis
       class PipelineResult
         attr_reader :command_count, :queried_timestamps
 
-        def initialize(command_count:, queried_timestamps:, empty:, slot_plan: nil)
+        def initialize(command_count:, queried_timestamps:, empty:, slot_plan:)
           @command_count = command_count
           @queried_timestamps = queried_timestamps || []
           @empty = empty
@@ -211,7 +207,7 @@ class Redis
 
         # Data commands only: the first/last-sample probes riding alongside are slots too (#22).
         def data_command_count
-          @slot_plan ? @slot_plan.size : command_count
+          @slot_plan.size
         end
 
         # Pull this handle's slice out of a shared pipeline result and return
@@ -251,8 +247,6 @@ class Redis
           # One reply per data command, trimmed to the buckets holding its first and last sample;
           # a window with no sample at all keeps nothing, as 8.2 returned.
           def replies(slice)
-            return slice if @slot_plan.nil?
-
             queue = slice.dup
             @slot_plan.map do |grid|
               reply = queue.shift || []
@@ -411,8 +405,10 @@ class Redis
           @slot_plan << grid
           return unless grid
 
-          pipeline.call("TS.RANGE", probe_args)
-          pipeline.call("TS.REVRANGE", probe_args)
+          # Through the series' own cmd, so the probes are encoded and debug-printed like the data command.
+          probe = [*window_args, "COUNT", 1]
+          @timeseries.send(:cmd, "TS.RANGE", @timeseries.key, probe, pipeline: pipeline)
+          @timeseries.send(:cmd, "TS.REVRANGE", @timeseries.key, probe, pipeline: pipeline)
         end
 
         def bucket_grid
@@ -430,17 +426,17 @@ class Redis
           { origin: wire_ms(origin), duration: @aggregation.duration }
         end
 
-        def probe_args
-          # Built the way #options builds the data command, so the probe sees exactly its filters.
-          [@timeseries.key, @start_time, @end_time,
-           (["FILTER_BY_TS", @filter_by_ts] if @filter_by_ts),
-           (["FILTER_BY_VALUE", @filter_by_value] if @filter_by_value),
-           "COUNT", 1].flatten.compact.map { |arg| Client.wire(arg) }
+        # The window and filters a command reads -- shared by the data command and its probes.
+        def window_args
+          args = [@start_time, @end_time]
+          args << ["FILTER_BY_TS", @filter_by_ts] if @filter_by_ts
+          args << ["FILTER_BY_VALUE", @filter_by_value] if @filter_by_value
+          args
         end
 
         # Must read a bound the way Client.wire writes it, or the grid is built on a timestamp Redis never saw.
         def wire_ms(value)
-          Integer(Client.wire(value).to_s)
+          value.is_a?(Time) ? Client.wire(value) : Integer(value)
         end
 
         # Milliseconds, from either form a bound arrives in — a Time, or the millisecond Integer
