@@ -198,6 +198,39 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
           expect(result.map { |sample| sample.time }).to eq([timestamp1, timestamp2, timestamp3])
         end
       end
+      # A window that does not start on the 1st used to step "start + 1 month" (6 Nov, 6 Dec ...)
+      # while closing each bucket at end_of_month, so days 1-5 of every later month fell between
+      # buckets, and the final partial month was never emitted.
+      context "with a window that does not start on the 1st" do
+        it "buckets per calendar month, clipped to the window at both ends" do
+          ts.madd({ Time.parse("2024-10-06 12:00") => 1, Time.parse("2024-10-31 12:00") => 2,
+                    Time.parse("2024-11-03 12:00") => 4, Time.parse("2024-11-14 12:00") => 8 })
+
+          range_cmd = described_class.new(timeseries: ts, start_time: Time.parse("2024-10-06"), end_time: Time.parse("2024-11-15"))
+          range_cmd.aggregation = ["sum", 2_629_746_000]
+
+          expect(range_cmd.cmd.map { |s| [s.time, s.value.to_i] }).to eq([[Time.parse("2024-10-06"), 3], [Time.parse("2024-11-01"), 12]])
+        end
+
+        it "keeps a month's last second in that month" do
+          ts.madd({ Time.parse("2024-10-31 23:59:59.500") => 5, Time.parse("2024-11-01 00:00:00") => 7 })
+
+          range_cmd = described_class.new(timeseries: ts, start_time: Time.parse("2024-10-15"), end_time: Time.parse("2024-11-15"))
+          range_cmd.aggregation = ["sum", 2_629_746_000]
+
+          expect(range_cmd.cmd.map { |s| s.value.to_i }).to eq([5, 7])
+        end
+      end
+
+      it "buckets a yearly read per calendar year, from the window start and including the last partial year" do
+        ts.madd({ Time.parse("2024-06-30 12:00") => 100, Time.parse("2024-07-02") => 1, Time.parse("2025-02-01") => 2 })
+
+        range_cmd = described_class.new(timeseries: ts, start_time: Time.parse("2024-07-01"), end_time: Time.parse("2025-03-01"))
+        range_cmd.aggregation = ["sum", 31_556_952_000]
+
+        expect(range_cmd.cmd.map { |s| [s.time, s.value.to_i] }).to eq([[Time.parse("2024-07-01"), 1], [Time.parse("2025-01-01"), 2]])
+      end
+
       # calendar_aggregation_loop narrows the window per month, with that month's exact length as
       # the bucket size, and had the same leak daily_aggregation did.
       it "restores its window and bucket size when a month raises" do
