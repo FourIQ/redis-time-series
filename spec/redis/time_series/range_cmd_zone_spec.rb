@@ -86,6 +86,14 @@ RSpec.describe Redis::TimeSeries::RangeCmd, "calendar buckets and time zones" do
       expect(range_cmd.start_time.zone).to eq("CEST")
       expect(range_cmd.end_time.utc_offset).to eq(7200)
     end
+
+    # A Float bound (`ms / 1000.0`) came out at .099999904 for a .100 bound.
+    it "keeps a millisecond bound exact" do
+      range_cmd = described_class.new(timeseries: ts, start_time: 1_591_590_303_100, end_time: 1_591_590_303_999)
+
+      expect(range_cmd.start_time.nsec).to eq(100_000_000)
+      expect(range_cmd.end_time.nsec).to eq(999_000_000)
+    end
   end
 
   # No application zone at all: the gem is usable outside Rails, so the process zone stays the

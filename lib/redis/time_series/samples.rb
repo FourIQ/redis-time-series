@@ -28,10 +28,10 @@ class Redis
         sample_sets.each_with_index do |samples, index|
           samples.each do |sample|
             sample_default = (merge_strategy.to_sym != :keep_first || (merge_strategy.to_sym == :keep_first && index == 0) ? CalculatedSample.new(sample.ts_msec, []) : nil)
-            calculated_sample = samples_hash.fetch(sample.time, sample_default)
+            calculated_sample = samples_hash.fetch(sample.ts_msec, sample_default)
             next if calculated_sample.nil?
             calculated_sample.value << sample.value
-            samples_hash[sample.time] = calculated_sample
+            samples_hash[sample.ts_msec] = calculated_sample
           end
         end
         samples = Samples.new(samples_hash.values)
@@ -114,7 +114,7 @@ class Redis
       end
 
       def filter_negative_values!
-        self.each { |sample| sample.value = 0 if sample.value.blank? || sample.value <= 0 }
+        self.each { |sample| sample.value = 0 if sample.value.nil? || sample.value <= 0 }
         self
       end
 

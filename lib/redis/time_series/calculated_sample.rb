@@ -3,7 +3,6 @@
 class Redis::TimeSeries::CalculatedSample < Redis::TimeSeries::Sample
   def initialize(timestamp, value)
     @ts_msec = timestamp
-    @time = Time.at(timestamp / 1000)
     @value = value
   end
 end
