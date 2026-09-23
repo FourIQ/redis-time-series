@@ -16,7 +16,9 @@ class Redis
       def initialize(timestamp, value)
         @ts_msec = timestamp
         @time = Time.at(timestamp / 1000)
-        @value = BigDecimal(value)
+        # RESP3 sends a value as a Float, which BigDecimal before 4.0 refuses without a precision; its
+        # shortest string is exactly the text RESP2 sends.
+        @value = BigDecimal(value.is_a?(Float) ? value.to_s : value)
       end
 
       # @return [Hash] a hash representation of the sample

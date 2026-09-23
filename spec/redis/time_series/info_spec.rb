@@ -22,7 +22,9 @@ RSpec.describe Redis::TimeSeries::Info do
       "rules" => { "dst" => [60_000, "AVG", 0] }, "ignoreMaxTimeDiff" => 0, "ignoreMaxValDiff" => 0.0 }
   end
 
-  def rules(info) = info.rules.map { |rule| [rule.destination_key, rule.aggregation.type, rule.aggregation.duration] }
+  def rules(info)
+    info.rules.map { |rule| [rule.destination_key, rule.aggregation.type, rule.aggregation.duration] }
+  end
 
   it "parses a RESP3 map to the same info as a RESP2 array" do
     from2 = described_class.parse(series: series, data: resp2)

@@ -10,7 +10,9 @@ RSpec.describe Redis::TimeSeries::Multi do
     { "m1" => [{ "foo" => "bar" }, { "aggregators" => [] }, [[1_700_000_000_000, 1.0], [1_700_000_060_000, 2.0]]] }
   end
 
-  def flat(multi) = multi.map { |result| [result.series.key, result.labels, result.samples.map { |s| [s.ts_msec, s.value] }] }
+  def flat(multi)
+    multi.map { |result| [result.series.key, result.labels, result.samples.map { |s| [s.ts_msec, s.value] }] }
+  end
 
   it "parses a RESP3 map to the same result as a RESP2 array" do
     expect(flat(described_class.new(resp3))).to eq(flat(described_class.new(resp2)))
