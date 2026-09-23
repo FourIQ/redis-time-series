@@ -34,16 +34,13 @@ class Redis
       # ─── 2. Configuration (chainable) ─────────────────────────────────
 
       # Calendar slicing reasons about wall-clock boundaries — beginning_of_year, beginning_of_day, a
-      # DST transition — so these have to resolve in the zone the CALLER thinks in. See CalendarZone.
-      #
-      # `/ 1000.0`, not `/ 1000`: integer division floors a run boundary (`msec(grid) - 1`) to the
-      # whole second, losing the 999 ms between it and the next run.
+      # DST transition — so these have to resolve in the zone the CALLER thinks in. See Zone.
       def start_time
-        CalendarZone.at(@start_time.is_a?(Numeric) ? @start_time / 1000.0 : @start_time)
+        time_at(@start_time)
       end
 
       def end_time
-        CalendarZone.at(@end_time.is_a?(Numeric) ? @end_time / 1000.0 : @end_time)
+        time_at(@end_time)
       end
 
       def aggregation=(aggregation)
@@ -112,30 +109,6 @@ class Redis
         handles.map do |handle|
           samples, offset = handle.consume(pipeline_result, offset)
           samples
-        end
-      end
-
-      # ─── 4b. Zones ────────────────────────────────────────────────────
-      #
-      # A bare `Time.at` renders in the PROCESS zone (ENV["TZ"]), which is the wrong zone for
-      # everything on the calendar path: a calendar bucket is one the application reads back as a
-      # day, month or year, and the application's zone is `Time.zone`. On a UTC-process host — the
-      # container default — that misalignment was silent: every day/month/year bucket aligned to a
-      # UTC boundary instead of the app's.
-      #
-      # Same root cause as FourIQ/fouriq_shared_models#286 on the consumer side.
-      module CalendarZone
-        module_function
-
-        # Rails' Time.zone when the host application has set one; nil for a standalone caller, which
-        # then keeps the process zone it had before.
-        def zone
-          zone = Time.zone if Time.respond_to?(:zone)
-          zone if zone.respond_to?(:at)
-        end
-
-        def at(seconds)
-          (zone || Time).at(seconds)
         end
       end
 
@@ -438,6 +411,11 @@ class Redis
         # bucket grid and a Time sent as-is all mean the same instant. Rounding put end_of_day on the next midnight.
         def msec(value)
           value.is_a?(Numeric) ? value.floor : Client.wire(value)
+        end
+
+        # The inverse of #msec: a bound as a time in the caller's zone, exact to the millisecond.
+        def time_at(value)
+          value.is_a?(Numeric) ? Zone.at_msec(value) : Zone.at(value)
         end
 
         # The grid point a calendar day after `grid`, keeping its wall-clock time of day.

@@ -4,8 +4,8 @@ class Redis
     # A sample is an immutable value object that represents a single data point within a time series.
     class Sample
 
-      # @return [Time] the sample's timestamp
-      attr_reader :time,:ts_msec
+      # @return [Integer] the sample's timestamp in milliseconds
+      attr_reader :ts_msec
       # @return [BigDecimal] the decimal value of the sample
       attr_accessor :value
 
@@ -15,10 +15,16 @@ class Redis
       # @see TimeSeries#range
       def initialize(timestamp, value)
         @ts_msec = timestamp
-        @time = Time.at(timestamp / 1000)
         # RESP3 sends a value as a Float, which BigDecimal before 4.0 refuses without a precision; its
         # shortest string is exactly the text RESP2 sends.
         @value = BigDecimal(value.is_a?(Float) ? value.to_s : value)
+      end
+
+      # Built on first read: most callers only ever touch the value or ts_msec.
+      # @return [Time, ActiveSupport::TimeWithZone] the sample's timestamp, to the millisecond, in
+      #   the application's Time.zone when one is set, otherwise in the process zone
+      def time
+        @time ||= Zone.at_msec(ts_msec)
       end
 
       # @return [Hash] a hash representation of the sample

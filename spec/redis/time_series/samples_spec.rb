@@ -99,6 +99,12 @@ RSpec.describe Redis::TimeSeries::Samples do
         expect(result.map { |s| s.ts_msec }).to eq([timestamp1, timestamp2])
         expect(result.map { |s| s.value }).to eq([0, 2])
       end
+
+      # A CalculatedSample takes any value; a blank one must read as zero, not raise on `<= 0`.
+      it "zeroes blank values" do
+        samples = described_class.new([nil, false, [], ""].map { |v| Redis::TimeSeries::CalculatedSample.new(timestamp1, v) })
+        expect(samples.filter_negative_values!.map(&:value)).to eq([0, 0, 0, 0])
+      end
     end
 
     describe "#set_negative_values!" do

@@ -9,7 +9,26 @@ RSpec.describe Redis::TimeSeries::Sample do
     subject { sample.time }
 
     it { is_expected.to be_a Time }
-    it { is_expected.to eq Time.at(timestamp / 1000.0) }
+    it { is_expected.to eq Time.at(Rational(timestamp, 1000)) }
+    it { expect(subject.nsec).to eq 100_000_000 }
+
+    # The clock time a caller formats or truncates has to be the application's, not the host's.
+    it "renders in Time.zone when one is set, whatever the process zone" do
+      in_zone("UTC") do
+        Time.use_zone("Europe/Amsterdam") do
+          expect(sample.time).to be_a(ActiveSupport::TimeWithZone)
+          expect(sample.time.time_zone.name).to eq("Europe/Amsterdam")
+          expect(sample.time.strftime("%Y-%m-%d %H:%M:%S.%L %z")).to eq("2020-06-08 06:25:03.100 +0200")
+        end
+      end
+    end
+
+    it "keeps the process zone for a caller without Time.zone" do
+      in_zone("UTC") do
+        expect(sample.time).to be_an_instance_of(Time)
+        expect(sample.time.strftime("%H:%M %z")).to eq("04:25 +0000")
+      end
+    end
   end
 
   describe '#value' do
