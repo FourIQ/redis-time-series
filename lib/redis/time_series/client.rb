@@ -6,10 +6,11 @@ class Redis
     # the parent {TimeSeries} class methods. You can enable or disable debugging, and set
     # a default Redis client to use for time series objects.
     module Client
-      # How an argument goes over the wire: a Time as whole-second milliseconds, anything else as its
-      # string. RangeCmd reads bounds back through this to know which timestamp Redis received.
+      # How an argument goes over the wire: a Time as its milliseconds, floored so a bound never
+      # reaches past what the caller asked for; anything else as its string. RangeCmd reads bounds
+      # back through this to know which timestamp Redis received.
       def self.wire(arg)
-        arg.is_a?(Time) ? arg.to_i * 1000 : arg.to_s
+        arg.is_a?(Time) ? (arg.to_i * 1000) + (arg.nsec / 1_000_000) : arg.to_s
       end
 
       def self.extended(base)

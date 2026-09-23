@@ -423,7 +423,7 @@ class Redis
           # An open bound ("-"/"+") is fine to probe, but not to build the grid on: Redis resolves it.
           return if origin.is_a?(String)
 
-          { origin: wire_ms(origin), duration: @aggregation.duration }
+          { origin: msec(origin), duration: @aggregation.duration }
         end
 
         # The window and filters a command reads -- shared by the data command and its probes.
@@ -434,16 +434,10 @@ class Redis
           args
         end
 
-        # Must read a bound the way Client.wire writes it, or the grid is built on a timestamp Redis never saw.
-        def wire_ms(value)
-          value.is_a?(Time) ? Client.wire(value) : Integer(value)
-        end
-
-        # Milliseconds, from either form a bound arrives in — a Time, or the millisecond Integer
-        # RangeCmd also accepts. Bounds go to Redis in this form and never as a Time, which
-        # Client#cmd_with_redis would serialise `to_i * 1000` and round away the run boundary.
+        # Milliseconds from either form a bound arrives in, by Client.wire's rule, so the daily runs, the
+        # bucket grid and a Time sent as-is all mean the same instant. Rounding put end_of_day on the next midnight.
         def msec(value)
-          value.is_a?(Numeric) ? value.round : (value.to_f * 1000).round
+          value.is_a?(Numeric) ? value.floor : Client.wire(value)
         end
 
         # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
