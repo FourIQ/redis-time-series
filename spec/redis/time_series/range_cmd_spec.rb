@@ -30,17 +30,35 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
   describe "#cmd" do
     def counting_pipeline
       Class.new do
-        attr_reader :count
+        attr_reader :count, :calls
 
-        def initialize = @count = 0
-        def call(_name, _args) = @count += 1
+        def initialize
+          @count = 0
+          @calls = []
+        end
+
+        def call(name, args)
+          @count += 1
+          @calls << [name, args]
+        end
+
+        # The first/last-sample probes each aggregated EMPTY command carries (#22).
+        def probes
+          @calls.count { |_name, args| args.last(2) == %w[COUNT 1] && !args.include?("AGGREGATION") }
+        end
+
+        def data_commands
+          count - probes
+        end
       end.new
     end
 
     # Fails part-way through a multi-command enqueue, the way a dropped connection would.
     def exploding_pipeline
       Class.new do
-        def initialize = @calls = 0
+        def initialize
+          @calls = 0
+        end
 
         def call(_name, _args)
           @calls += 1
@@ -127,7 +145,7 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
           handle = nil
           Redis::TimeSeries.redis.with { |conn| conn.pipelined { |p| handle = range_cmd.enqueue(p) } }
           # 3 months × 1 chunk (100 ≤ 128) = 3 commands
-          expect(handle.command_count).to eq(3)
+          expect(handle.data_command_count).to eq(3)
           expect(handle.queried_timestamps.size).to eq(3)
         end
       end
@@ -158,7 +176,7 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
           handle = nil
           Redis::TimeSeries.redis.with { |conn| conn.pipelined { |p| handle = range_cmd.enqueue(p) } }
           # filter_by_ts wins → 1 command per month, 2 months → 2 commands (not 4 from per-sub-range slicing)
-          expect(handle.command_count).to eq(2)
+          expect(handle.data_command_count).to eq(2)
           # qts is now tracked per emitted command (not per iteration), so qts.size == command_count.
           expect(handle.queried_timestamps.size).to eq(2)
         end
@@ -335,7 +353,8 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         range_cmd.aggregation = ["avg", 86_400_000]
         range_cmd.enqueue(pipeline)
 
-        expect(pipeline.count).to eq(5)
+        expect(pipeline.data_commands).to eq(5)
+        expect(pipeline.probes).to eq(10)
       end
 
       # Each of the four below is a zone or a window the walker used to get wrong; all reproduced
@@ -369,7 +388,7 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         range_cmd.aggregation = ["avg", 86_400_000]
         range_cmd.enqueue(pipeline)
 
-        expect(pipeline.count).to eq(1)
+        expect(pipeline.data_commands).to eq(1)
       end
 
       context "in a zone whose offset moves by a whole day" do
@@ -651,7 +670,7 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
           handle = range_cmd.enqueue(pipeline)
         end
       end
-      expect(handle.command_count).to eq(3)
+      expect(handle.data_command_count).to eq(3)
       expect(handle.queried_timestamps.size).to eq(3)
     end
   end
