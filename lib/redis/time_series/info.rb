@@ -71,7 +71,9 @@ class Redis
         private
 
         def build_hash(data)
-          data.each_slice(2).reduce({}) do |h, (key, value)|
+          # RESP2 replies with a flat array of pairs, RESP3 with a map.
+          pairs = data.is_a?(Hash) ? data : data.each_slice(2)
+          pairs.reduce({}) do |h, (key, value)|
             # Convert camelCase info keys to snake_case
             key = key.gsub(/(.)([A-Z])/,'\1_\2').downcase.to_sym
             # Skip unknown properties
@@ -91,7 +93,10 @@ class Redis
         end
 
         def parse_rules(hash)
-          hash[:rules] = hash[:rules].map { |d| Rule.new(source: hash[:series], data: d) }
+          # RESP3 keys each rule by its destination: { "dst" => [bucket, aggregation, align] }.
+          rules = hash[:rules]
+          rules = rules.map { |destination, rule| [destination, *rule] } if rules.is_a?(Hash)
+          hash[:rules] = rules.map { |d| Rule.new(source: hash[:series], data: d) }
           hash
         end
       end
