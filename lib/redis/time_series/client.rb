@@ -10,7 +10,7 @@ class Redis
       # reaches past what the caller asked for; anything else as its string. RangeCmd reads bounds
       # back through this to know which timestamp Redis received.
       def self.wire(arg)
-        arg.is_a?(Time) ? (arg.to_r * 1000).floor : arg.to_s
+        arg.is_a?(Time) ? (arg.to_i * 1000) + (arg.nsec / 1_000_000) : arg.to_s
       end
 
       def self.extended(base)
