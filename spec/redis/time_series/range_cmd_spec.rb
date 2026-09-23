@@ -43,15 +43,22 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         end
 
         # The first/last-sample probes each aggregated EMPTY command carries (#22).
-        def probes = @calls.count { |_name, args| args.last(2) == %w[COUNT 1] && !args.include?("AGGREGATION") }
-        def data_commands = count - probes
+        def probes
+          @calls.count { |_name, args| args.last(2) == %w[COUNT 1] && !args.include?("AGGREGATION") }
+        end
+
+        def data_commands
+          count - probes
+        end
       end.new
     end
 
     # Fails part-way through a multi-command enqueue, the way a dropped connection would.
     def exploding_pipeline
       Class.new do
-        def initialize = @calls = 0
+        def initialize
+          @calls = 0
+        end
 
         def call(_name, _args)
           @calls += 1
