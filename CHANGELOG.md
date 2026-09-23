@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+* `require "redis-time-series"` loads on its own; it raised `uninitialized constant Redis::BaseError` unless `redis` had been required first.
+* Trimming an aggregated reply to its data buckets walks only the dropped edge rows instead of every row: 1.3 ms to 0.1 ms per 50-series batch.
 * ⚠️ `Sample#time` returns the instant in the application's `Time.zone` (an `ActiveSupport::TimeWithZone`) when one is set, and keeps its milliseconds; without `Time.zone` it stays a process-zone `Time`. It was `Time.at(ms / 1000)`, so formatting or date-truncating it (`strftime`, `to_date`, `hour`) followed the host's `ENV["TZ"]` and dropped the sub-second part. It is built on first read, so paths that only use `value`/`ts_msec` no longer pay for it. `RangeCmd#start_time`/`#end_time` are exact to the millisecond as well (a Float bound came out nanoseconds short).
 * `Samples.merge` keys on `ts_msec` instead of the whole-second `time`, so two samples less than a second apart are no longer folded into one merged sample.
 * `activesupport` (>= 7.0) is a runtime dependency. The gem already needed it at runtime for monthly and yearly aggregation and for `blank?`, but only declared it for development; removing it again is tracked in #29.

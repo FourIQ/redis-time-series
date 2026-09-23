@@ -229,7 +229,10 @@ class Redis
               next [] unless first && last
 
               low, high = bucket_of(first[0].to_i, grid), bucket_of(last[0].to_i, grid)
-              reply.select { |row| row[0].to_i.between?(low, high) }
+              # The kept rows are contiguous, so only the trimmed edges are walked, not every row.
+              inside = ->(row) { row[0].to_i.between?(low, high) }
+              from = reply.index(&inside)
+              from ? reply[from..reply.rindex(&inside)] : []
             end
           end
 
