@@ -17,6 +17,12 @@ class Redis
       def at(seconds)
         (zone || Time).at(seconds)
       end
+
+      # Rational, not `/ 1000`: integer division floors to the whole second (a run boundary is
+      # `msec(grid) - 1`), and a Float lands nanoseconds short of the millisecond.
+      def at_msec(msec)
+        at(Rational(msec, 1000))
+      end
     end
   end
 end

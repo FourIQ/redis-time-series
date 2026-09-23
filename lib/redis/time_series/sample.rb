@@ -24,7 +24,7 @@ class Redis
       # @return [Time, ActiveSupport::TimeWithZone] the sample's timestamp, to the millisecond, in
       #   the application's Time.zone when one is set, otherwise in the process zone
       def time
-        @time ||= Zone.at(Rational(ts_msec, 1000))
+        @time ||= Zone.at_msec(ts_msec)
       end
 
       # @return [Hash] a hash representation of the sample

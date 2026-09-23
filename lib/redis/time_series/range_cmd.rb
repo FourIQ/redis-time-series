@@ -35,15 +35,12 @@ class Redis
 
       # Calendar slicing reasons about wall-clock boundaries — beginning_of_year, beginning_of_day, a
       # DST transition — so these have to resolve in the zone the CALLER thinks in. See Zone.
-      #
-      # Rational, not `/ 1000`: integer division floors a run boundary (`msec(grid) - 1`) to the
-      # whole second, losing the 999 ms between it and the next run; a Float is off by nanoseconds.
       def start_time
-        Zone.at(@start_time.is_a?(Numeric) ? Rational(@start_time, 1000) : @start_time)
+        time_at(@start_time)
       end
 
       def end_time
-        Zone.at(@end_time.is_a?(Numeric) ? Rational(@end_time, 1000) : @end_time)
+        time_at(@end_time)
       end
 
       def aggregation=(aggregation)
@@ -414,6 +411,11 @@ class Redis
         # bucket grid and a Time sent as-is all mean the same instant. Rounding put end_of_day on the next midnight.
         def msec(value)
           value.is_a?(Numeric) ? value.floor : Client.wire(value)
+        end
+
+        # The inverse of #msec: a bound as a time in the caller's zone, exact to the millisecond.
+        def time_at(value)
+          value.is_a?(Numeric) ? Zone.at_msec(value) : Zone.at(value)
         end
 
         # The grid point a calendar day after `grid`, keeping its wall-clock time of day.
