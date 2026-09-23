@@ -152,11 +152,13 @@ class Redis
       def enqueue(pipeline)
         validate!
         counting_pipeline = CountingPipeline.new(pipeline)
+        @slot_plan = []
         queried_timestamps = route_to_pipeline(counting_pipeline)
         PipelineResult.new(
           command_count: counting_pipeline.count,
           queried_timestamps: queried_timestamps,
-          empty: @empty
+          empty: @empty,
+          slot_plan: @slot_plan
         )
       end
 
@@ -196,14 +198,20 @@ class Redis
       class PipelineResult
         attr_reader :command_count, :queried_timestamps
 
-        def initialize(command_count:, queried_timestamps:, empty:)
+        def initialize(command_count:, queried_timestamps:, empty:, slot_plan: nil)
           @command_count = command_count
           @queried_timestamps = queried_timestamps || []
           @empty = empty
+          @slot_plan = slot_plan
         end
 
         def empty?
           @empty
+        end
+
+        # Data commands only: the first/last-sample probes riding alongside are slots too (#22).
+        def data_command_count
+          @slot_plan ? @slot_plan.size : command_count
         end
 
         # Pull this handle's slice out of a shared pipeline result and return
@@ -220,7 +228,7 @@ class Redis
         #
         # Otherwise (daily aggregation, non-calendar paths) the slice is flattened one level; rows already carry their own timestamps and no NaN injection is needed.
         def resolve(slice)
-          slice = slice.map { |raw| sanitize(raw) }
+          slice = replies(slice.map { |raw| sanitize(raw) })
           rows =
             if @empty && !queried_timestamps.empty?
               slice.each_with_index.map do |raw, i|
@@ -240,6 +248,28 @@ class Redis
           # and becomes an empty reply; anything else is re-raised as
           # Redis::CommandError — the class plain pipelined raised before, so
           # callers' rescue contracts are unchanged.
+          # One reply per data command, trimmed to the buckets holding its first and last sample;
+          # a window with no sample at all keeps nothing, as 8.2 returned.
+          def replies(slice)
+            return slice if @slot_plan.nil?
+
+            queue = slice.dup
+            @slot_plan.map do |grid|
+              reply = queue.shift || []
+              next reply unless grid
+
+              first, last = queue.shift.to_a.first, queue.shift.to_a.first
+              next [] unless first && last
+
+              low, high = bucket_of(first[0].to_i, grid), bucket_of(last[0].to_i, grid)
+              reply.select { |row| row[0].to_i.between?(low, high) }
+            end
+          end
+
+          def bucket_of(timestamp, grid)
+            grid[:origin] + ((timestamp - grid[:origin]).div(grid[:duration]) * grid[:duration])
+          end
+
           def sanitize(raw)
             return raw unless raw.is_a?(StandardError)
             raise Redis::CommandError, raw.message unless raw.message.include?(Redis::TimeSeries::MISSING_KEY_MESSAGE)
@@ -276,7 +306,7 @@ class Redis
           elsif @filter_by_range
             enqueue_filtered_by_range(pipeline)
           else
-            @timeseries.range_cmd(self, pipeline: pipeline)
+            emit(pipeline)
           end
         end
 
@@ -310,9 +340,9 @@ class Redis
               @start_time = current_start
               @end_time = current_end
 
-              before = pipeline.count
+              before = @slot_plan.size
               enqueue_window(pipeline)
-              (pipeline.count - before).times { queried_timestamps << current_start.to_i * 1000 }
+              (@slot_plan.size - before).times { queried_timestamps << current_start.to_i * 1000 }
 
               current_start = current_start.advance(advance_by => 1)
               current_end = (yield current_start) - 1
@@ -370,6 +400,48 @@ class Redis
           runs
         end
 
+        # With EMPTY, Redis 8.2 reported buckets from the first one holding data to the last; 8.10
+        # fills empty ones out to the window's edges -- 0 for sum/count, the previous value for
+        # `last` -- so they read as data. Each command therefore carries two probes, the first and
+        # last sample of its own window under its own filters, and resolve trims to the buckets
+        # between them. `twa` is left alone: it interpolates across bucket edges by design.
+        def emit(pipeline)
+          @timeseries.range_cmd(self, pipeline: pipeline)
+          grid = bucket_grid
+          @slot_plan << grid
+          return unless grid
+
+          pipeline.call("TS.RANGE", probe_args)
+          pipeline.call("TS.REVRANGE", probe_args)
+        end
+
+        def bucket_grid
+          return unless @aggregation && @empty && @aggregation.type.to_s != "twa"
+          return if @start_time.is_a?(String) || @end_time.is_a?(String)
+
+          from = wire_ms(@start_time)
+          origin =
+            case @align
+            when "start", "-" then from
+            when "end", "+" then wire_ms(@end_time)
+            else wire_ms(@align)
+            end
+          { origin: origin, duration: @aggregation.duration }
+        end
+
+        def probe_args
+          # Built the way #options builds the data command, so the probe sees exactly its filters.
+          [@timeseries.key, @start_time, @end_time,
+           (["FILTER_BY_TS", @filter_by_ts] if @filter_by_ts),
+           (["FILTER_BY_VALUE", @filter_by_value] if @filter_by_value),
+           "COUNT", 1].flatten.compact.map { |arg| Client.wire(arg) }
+        end
+
+        # Must read a bound the way Client.wire writes it, or the grid is built on a timestamp Redis never saw.
+        def wire_ms(value)
+          Integer(Client.wire(value).to_s)
+        end
+
         # Milliseconds, from either form a bound arrives in — a Time, or the millisecond Integer
         # RangeCmd also accepts. Bounds go to Redis in this form and never as a Time, which
         # Client#cmd_with_redis would serialise `to_i * 1000` and round away the run boundary.
@@ -414,7 +486,7 @@ class Redis
             clipped_ranges.each do |sub_range|
               @start_time = sub_range.begin
               @end_time = sub_range.end
-              @timeseries.range_cmd(self, pipeline: pipeline)
+              emit(pipeline)
             end
           end
         end
@@ -439,7 +511,7 @@ class Redis
           preserving_state do
             @filter_by_ts.each_slice(FILTER_BY_TS_LIMIT) do |slice|
               @filter_by_ts = slice
-              @timeseries.range_cmd(self, pipeline: pipeline)
+              emit(pipeline)
             end
           end
         end
