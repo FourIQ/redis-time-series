@@ -8,6 +8,7 @@ require 'active_support/testing/time_helpers'
 require 'pry'
 require 'redis'
 require 'timeout'
+require 'securerandom'
 require 'redis-time-series'
 
 REDIS_PORT = ENV['REDIS_PORT'] || 9000
@@ -27,9 +28,23 @@ module ZoneHelpers
   end
 end
 
+# db 13 is shared with other suites (DE, PE's Redis::Objects), so it is never flushed. Instead
+# every key and label value this run writes is its own: a stray key can't match, concurrent runs
+# can't collide, and cleanup deletes only what this run created.
+SPEC_RUN = "#{Process.pid}-#{SecureRandom.hex(3)}"
+SPEC_NAMESPACE = "rts_spec:#{SPEC_RUN}:"
+
 module RedisHelpers
   def redis
     @redis ||= ConnectionPool.new(size: 25, timeout: 50) { Redis.new(host: REDIS_HOST, port: REDIS_PORT, password: REDIS_PASSWORD, db: 13) }
+  end
+
+  def spec_key(name)
+    "#{SPEC_NAMESPACE}#{name}"
+  end
+
+  def spec_label(value)
+    "#{value}-#{SPEC_RUN}"
   end
 end
 
@@ -46,8 +61,13 @@ RSpec.configure do |config|
   config.include ZoneHelpers
   config.include ActiveSupport::Testing::TimeHelpers
 
-  #config.before(:suite) { Redis.new.flushdb }
   config.before { Redis::TimeSeries.redis = redis }
+  config.after(:suite) do
+    conn = Redis.new(host: REDIS_HOST, port: REDIS_PORT, password: REDIS_PASSWORD, db: 13)
+    conn.scan_each(match: "#{SPEC_NAMESPACE}*", count: 1000).each_slice(500) { |keys| conn.del(*keys) }
+  ensure
+    conn&.close
+  end
 end
 
 RSpec::Matchers.define :issue_command do |expected|

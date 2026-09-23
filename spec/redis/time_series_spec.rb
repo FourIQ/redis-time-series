@@ -3,7 +3,7 @@
 RSpec.describe Redis::TimeSeries do
   subject(:ts) { described_class.create(key) }
 
-  let(:key) { "time_series_test" }
+  let(:key) { spec_key("time_series_test") }
   let(:time) { 1_591_339_859 }
   let(:from) { Time.at(time) }
   let(:to) { Time.at(time) + 120 }
@@ -20,11 +20,10 @@ RSpec.describe Redis::TimeSeries do
 
   describe ".new_or_create" do
     it "returns a new or existing timeseries object" do
-      Redis::TimeSeries.destroy("test123123")
       # first test if the TS does not exist
-      expect(described_class.new_or_create("test123123")).to be_a(Redis::TimeSeries)
+      expect(described_class.new_or_create(key)).to be_a(Redis::TimeSeries)
       # then test if the TS does exist
-      expect(described_class.new_or_create("test123123")).to be_a(Redis::TimeSeries)
+      expect(described_class.new_or_create(key)).to be_a(Redis::TimeSeries)
     end
   end
 
@@ -182,37 +181,40 @@ RSpec.describe Redis::TimeSeries do
     describe "with multiple series" do
       let(:time) { Time.now }
       let(:ts_msec) { time.to_i * 1000 }
+      let(:foo) { spec_key("foo") }
+      let(:bar) { spec_key("bar") }
+      let(:baz) { spec_key("baz") }
 
       before do
-        %i[foo bar baz].each { |key| described_class.create(key) }
+        [foo, bar, baz].each { |key| described_class.create(key) }
         travel_to time
       end
 
       after do
-        %i[foo bar baz].each { |key| described_class.destroy(key) }
+        [foo, bar, baz].each { |key| described_class.destroy(key) }
         travel_back
       end
 
       specify do
-        expect { described_class.madd(foo: 1, bar: 2, baz: 3) }.to issue_command(\
-          "TS.MADD foo * 1 bar * 2 baz * 3")
+        expect { described_class.madd(foo => 1, bar => 2, baz => 3) }.to issue_command(\
+          "TS.MADD #{foo} * 1 #{bar} * 2 #{baz} * 3")
       end
 
       specify do
         expect do
-          described_class.madd(foo: { 123 => 1 }, bar: { 456 => 2, 678 => 3 })
-        end.to issue_command("TS.MADD foo 123 1 bar 456 2 bar 678 3")
+          described_class.madd(foo => { 123 => 1 }, bar => { 456 => 2, 678 => 3 })
+        end.to issue_command("TS.MADD #{foo} 123 1 #{bar} 456 2 #{bar} 678 3")
       end
 
       specify do
         expect do
-          described_class.madd(foo: [1, 2, 3], bar: [4, 5, 6, 7])
-        end.to issue_command("TS.MADD foo #{ts_msec} 1 foo #{ts_msec + 1} 2 foo #{ts_msec + 2} 3 "\
-        "bar #{ts_msec} 4 bar #{ts_msec + 1} 5 bar #{ts_msec + 2} 6 bar #{ts_msec + 3} 7")
+          described_class.madd(foo => [1, 2, 3], bar => [4, 5, 6, 7])
+        end.to issue_command("TS.MADD #{foo} #{ts_msec} 1 #{foo} #{ts_msec + 1} 2 #{foo} #{ts_msec + 2} 3 "\
+        "#{bar} #{ts_msec} 4 #{bar} #{ts_msec + 1} 5 #{bar} #{ts_msec + 2} 6 #{bar} #{ts_msec + 3} 7")
       end
 
       it "correctly returns samples" do
-        expect(described_class.madd(foo: { 123 => 1, 456 => 2 })).to all(
+        expect(described_class.madd(foo => { 123 => 1, 456 => 2 })).to all(
           be_a(Redis::TimeSeries::Sample)
         )
       end
@@ -225,7 +227,7 @@ RSpec.describe Redis::TimeSeries do
     end
 
     context "when the series does not exist" do
-      let(:missing_ts) { described_class.new("time_series_test_missing") }
+      let(:missing_ts) { described_class.new(spec_key("time_series_test_missing")) }
 
       # Shared dev Redis, never flushed — an interrupted run must not leave a wrong-type key behind.
       after { redis.with { |conn| conn.del(missing_ts.key) } }
@@ -275,7 +277,7 @@ RSpec.describe Redis::TimeSeries do
   end
 
   describe "TS.CREATERULE" do
-    let(:dest_key) { "test_ts_createrule" }
+    let(:dest_key) { spec_key("test_ts_createrule") }
 
     before { described_class.create(dest_key) }
     after { described_class.destroy(dest_key) }
@@ -298,7 +300,7 @@ RSpec.describe Redis::TimeSeries do
   end
 
   describe "TS.DELETERULE" do
-    let(:dest_key) { "test_ts_deleterule" }
+    let(:dest_key) { spec_key("test_ts_deleterule") }
 
     before do
       dest = described_class.create(dest_key)
@@ -451,29 +453,31 @@ RSpec.describe Redis::TimeSeries do
 
 
   context "with multi-series queries" do
-    let(:mrange) { described_class.mrange(100..300, filter: { foo: "bar" }) }
-    let(:mrevrange) { described_class.mrevrange(100..300, filter: { foo: "bar" }) }
+    let(:label) { spec_label("bar") }
+    let(:ts1_key) { spec_key("ts1") }
+    let(:ts2_key) { spec_key("ts2") }
+    let(:mrange) { described_class.mrange(100..300, filter: { foo: label }) }
+    let(:mrevrange) { described_class.mrevrange(100..300, filter: { foo: label }) }
+
+    let(:stray_key) { spec_key("stray") }
 
     before do
-      ts1 = described_class.create("ts1", labels: { foo: "bar" })
-      ts2 = described_class.create("ts2", labels: { foo: "bar" })
+      ts1 = described_class.create(ts1_key, labels: { foo: label })
+      ts2 = described_class.create(ts2_key, labels: { foo: label })
       ts1.madd(200 => 4, 201 => 5, 202 => 6)
       ts2.madd(203 => 7, 204 => 8, 205 => 9)
+      # The #26 incident: a leftover series labelled plain foo=bar must not show up in the result.
+      described_class.create(stray_key, labels: { foo: "bar" }).madd(200 => 1)
     end
 
-    after do
-      self.redis.with{ |conn|
-        conn.del("ts1")
-        conn.del("ts2")
-      }
-    end
+    after { redis.with { |conn| conn.del(ts1_key, ts2_key, stray_key) } }
 
     describe "mrange" do
       let(:result) { mrange }
 
       it "returns a Multi result" do
         expect(result).to be_a Redis::TimeSeries::Multi
-        expect(result.keys).to contain_exactly("ts1", "ts2")
+        expect(result.keys).to contain_exactly(ts1_key, ts2_key)
         expect(result[0].values).to eq [4, 5, 6]
         expect(result[1].values).to eq [7, 8, 9]
       end
@@ -484,7 +488,7 @@ RSpec.describe Redis::TimeSeries do
 
       it "returns a Multi result" do
         expect(result).to be_a Redis::TimeSeries::Multi
-        expect(result.keys).to contain_exactly("ts1", "ts2")
+        expect(result.keys).to contain_exactly(ts1_key, ts2_key)
         expect(result[0].values).to eq [6, 5, 4]
         expect(result[1].values).to eq [9, 8, 7]
       end
@@ -555,21 +559,22 @@ RSpec.describe Redis::TimeSeries do
   describe "TS.QUERYINDEX" do
     subject(:result) { described_class.query_index(filters) }
 
-    let(:filters) { "foo=bar" }
+    let(:label) { spec_label("bar") }
+    let(:good) { spec_key("good") }
+    let(:bad) { spec_key("bad") }
+    let(:stray) { spec_key("stray") }
+    let(:filters) { "foo=#{label}" }
 
     before do
-      described_class.create("good", labels: { foo: "bar" })
-      described_class.create("bad", labels: { baz: "quux" })
+      described_class.create(good, labels: { foo: label })
+      described_class.create(bad, labels: { baz: "quux" })
+      # The #26 incident: a leftover series labelled plain foo=bar must not show up in the result.
+      described_class.create(stray, labels: { foo: "bar" })
     end
 
-    after do
-      self.redis.with{ |conn|
-        conn.del("good")
-        conn.del("bad")
-      }
-    end
+    after { redis.with { |conn| conn.del(good, bad, stray) } }
 
-    specify { expect { result }.to issue_command("TS.QUERYINDEX foo=bar") }
+    specify { expect { result }.to issue_command("TS.QUERYINDEX foo=#{label}") }
 
     it "requires filters" do
       expect { described_class.query_index }.to raise_error ArgumentError
@@ -584,22 +589,22 @@ RSpec.describe Redis::TimeSeries do
     end
 
     context "with a hash of filters" do
-      let(:filters) { { foo: "bar" } }
+      let(:filters) { { foo: label } }
 
       it "returns matching time series" do
         expect(result.size).to eq 1
         expect(result.first).to be_a described_class
-        expect(result.first.key).to eq "good"
+        expect(result.first.key).to eq good
       end
     end
 
     context "with a filter string" do
-      let(:filters) { "foo=bar" }
+      let(:filters) { "foo=#{label}" }
 
       it "returns matching time series" do
         expect(result.size).to eq 1
         expect(result.first).to be_a described_class
-        expect(result.first.key).to eq "good"
+        expect(result.first.key).to eq good
       end
     end
   end

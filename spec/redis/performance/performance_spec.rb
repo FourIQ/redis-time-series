@@ -13,8 +13,8 @@ RSpec.describe Redis::TimeSeries do
 
   subject(:ts_avg) { described_class.new_or_create(avg_key) }
 
-  let(:key) { "time_series_performance" }
-  let(:avg_key) { "time_series_performance_avg" }
+  let(:key) { spec_key("time_series_performance") }
+  let(:avg_key) { spec_key("time_series_performance_avg") }
 
   let(:time) { 1_591_339_859 }
   let(:from) { Time.at(time) }

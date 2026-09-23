@@ -5,13 +5,13 @@ require "spec_helper"
 RSpec.describe Redis::TimeSeries::RangeCmd do
   subject(:range) { described_class.new(timeseries: ts) }
 
-  let(:key) { "time_series_test" }
+  let(:key) { spec_key("time_series_test") }
   subject(:ts) { Redis::TimeSeries.create(key) }
 
   let(:summer_time) { Time.parse("2024-03-31") }
   let(:winter_time) { Time.parse("2024-10-27") }
 
-  let(:key) { "range_test" }
+  let(:key) { spec_key("range_test") }
 
   after { Redis::TimeSeries.redis.with{ |conn| conn.del(key) } }
 
@@ -73,7 +73,7 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
     end
 
     context "when the series key does not exist" do
-      let(:missing_ts) { Redis::TimeSeries.new("range_test_missing_key") }
+      let(:missing_ts) { Redis::TimeSeries.new(spec_key("range_test_missing_key")) }
 
       it "returns empty Samples instead of raising" do
         cmd = described_class.new(timeseries: missing_ts, start_time: Time.parse("2024-01-01"), end_time: Time.parse("2024-01-02"))
@@ -82,12 +82,12 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       end
 
       it "still raises for errors other than a missing key" do
-        Redis::TimeSeries.redis.with { |conn| conn.set("range_test_missing_key", "not a timeseries") }
+        Redis::TimeSeries.redis.with { |conn| conn.set(spec_key("range_test_missing_key"), "not a timeseries") }
         cmd = described_class.new(timeseries: missing_ts, start_time: Time.parse("2024-01-01"), end_time: Time.parse("2024-01-02"))
 
         expect { cmd.cmd }.to raise_error(Redis::CommandError)
       ensure
-        Redis::TimeSeries.redis.with { |conn| conn.del("range_test_missing_key") }
+        Redis::TimeSeries.redis.with { |conn| conn.del(spec_key("range_test_missing_key")) }
       end
     end
 

@@ -5,7 +5,7 @@ require "spec_helper"
 # With EMPTY, Redis 8.2 reported buckets from the first one holding data to the last; 8.10 fills empty
 # ones out to the window's edges. These pin the 8.2 behaviour on whichever server the suite runs.
 RSpec.describe Redis::TimeSeries::RangeCmd do
-  let(:key) { "range_edges_test" }
+  let(:key) { spec_key("range_edges_test") }
 
   subject(:ts) { Redis::TimeSeries.create(key) }
 
