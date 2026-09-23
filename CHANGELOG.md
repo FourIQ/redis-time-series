@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.8.16
 * `require "redis-time-series"` loads on its own; it raised `uninitialized constant Redis::BaseError` unless `redis` had been required first.
 * Trimming an aggregated reply to its data buckets walks only the dropped edge rows instead of every row: 1.3 ms to 0.1 ms per 50-series batch.
 * ⚠️ `Sample#time` returns the instant in the application's `Time.zone` (an `ActiveSupport::TimeWithZone`) when one is set, and keeps its milliseconds; without `Time.zone` it stays a process-zone `Time`. It was `Time.at(ms / 1000)`, so formatting or date-truncating it (`strftime`, `to_date`, `hour`) followed the host's `ENV["TZ"]` and dropped the sub-second part. It is built on first read, so paths that only use `value`/`ts_msec` no longer pay for it. `RangeCmd#start_time`/`#end_time` are exact to the millisecond as well (a Float bound came out nanoseconds short).
