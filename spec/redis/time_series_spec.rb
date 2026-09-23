@@ -510,17 +510,15 @@ RSpec.describe Redis::TimeSeries do
 
     it "returns an info struct" do
       expect(info).to be_a Redis::TimeSeries::Info
-      expect(info.to_h).to eq(
+      expect(info.to_h.except(:duplicate_policy, :memory_usage)).to eq(
         {
           chunk_count: 1,
           chunk_size: 4096,
           chunk_type: "compressed",
-          duplicate_policy: nil,
           first_timestamp: 0,
           labels: {},
           last_timestamp: 0,
           max_samples_per_chunk: nil,
-          memory_usage: 4184,
           retention_time: 0,
           rules: [],
           series: ts,
@@ -528,6 +526,10 @@ RSpec.describe Redis::TimeSeries do
           total_samples: 0
         }
       )
+      # Both are the server's rather than the gem's: Redis 8 reports its default policy explicitly,
+      # and memory_usage is an allocator detail that moves between server versions.
+      expect(info.duplicate_policy).to be_block
+      expect(info.memory_usage).to be_a(Integer).and(be_positive)
     end
 
     (Redis::TimeSeries::Info.members - [:series]).each do |member|
