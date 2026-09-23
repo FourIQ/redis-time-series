@@ -30,7 +30,9 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
     cmd.cmd
   end
 
-  def labels(samples) = samples.map { |sample| Time.at(sample.ts_msec / 1000).strftime("%m-%d %H:%M") }
+  def labels(samples)
+    samples.map { |sample| Time.at(sample.ts_msec / 1000).strftime("%m-%d %H:%M") }
+  end
 
   it "starts and ends at the buckets holding the window's first and last sample" do
     result = read("2025-10-02 14:37", "2025-10-10 14:37", "avg", 900_000)
@@ -71,6 +73,13 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
     cmd.aggregation = ["avg", ((to.to_i - from.to_i) * 1000) + 1]
 
     expect(cmd.cmd).to be_empty
+  end
+
+  # An endless range leaves the end to Redis ("+"), but the grid still starts at the window's start.
+  it "trims an endless range too" do
+    result = ts.range(Time.parse("2025-10-02 14:37").., aggregation: [:avg, 900_000])
+
+    expect(labels(result).first).to eq("10-02 14:52")
   end
 
   it "trims to the samples that pass the read's own value filter" do

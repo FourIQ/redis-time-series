@@ -417,16 +417,17 @@ class Redis
 
         def bucket_grid
           return unless @aggregation && @empty && @aggregation.type.to_s != "twa"
-          return if @start_time.is_a?(String) || @end_time.is_a?(String)
 
-          from = wire_ms(@start_time)
           origin =
             case @align
-            when "start", "-" then from
-            when "end", "+" then wire_ms(@end_time)
-            else wire_ms(@align)
+            when "start", "-" then @start_time
+            when "end", "+" then @end_time
+            else @align
             end
-          { origin: origin, duration: @aggregation.duration }
+          # An open bound ("-"/"+") is fine to probe, but not to build the grid on: Redis resolves it.
+          return if origin.is_a?(String)
+
+          { origin: wire_ms(origin), duration: @aggregation.duration }
         end
 
         def probe_args
