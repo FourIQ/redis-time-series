@@ -22,7 +22,7 @@ RSpec.describe Redis::TimeSeries::Client do
   # end_of_day is 23:59:59.999999; sent as whole seconds it stopped at 23:59:59.000 and dropped the
   # last second of every day a caller asked for.
   describe "a range bounded by end_of_day" do
-    let(:key) { "wire_test" }
+    let(:key) { spec_key("wire_test") }
 
     subject(:ts) { Redis::TimeSeries.create(key) }
 

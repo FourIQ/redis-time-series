@@ -11,7 +11,7 @@ require "spec_helper"
 # that can tell the two apart. The existing range_cmd_spec covers the other half — no Time.zone set,
 # process zone honoured — so both paths stay pinned.
 RSpec.describe Redis::TimeSeries::RangeCmd, "calendar buckets and time zones" do
-  let(:key) { "range_zone_test" }
+  let(:key) { spec_key("range_zone_test") }
   subject(:ts) { Redis::TimeSeries.create(key) }
 
   around do |example|
