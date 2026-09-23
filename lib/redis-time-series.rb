@@ -1,5 +1,8 @@
 require 'bigdecimal'
 require 'forwardable'
+require 'active_support'
+require 'active_support/core_ext/object/blank'
+require 'active_support/core_ext/time/calculations'
 
 require 'redis/time_series/client'
 require 'redis/time_series/errors'

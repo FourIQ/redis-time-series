@@ -114,7 +114,7 @@ class Redis
       end
 
       def filter_negative_values!
-        self.each { |sample| sample.value = 0 if sample.value.nil? || sample.value <= 0 }
+        self.each { |sample| sample.value = 0 if sample.value.blank? || sample.value <= 0 }
         self
       end
 
