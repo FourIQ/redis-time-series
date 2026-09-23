@@ -1,6 +1,8 @@
 # Changelog
 
 ## Unreleased
+
+## 0.8.17
 * Monthly and yearly aggregation bucket per **calendar** period, clipped to the window at both ends. A window not starting on the 1st stepped `start + 1 month` (6 Nov, 6 Dec ...) while closing each bucket at `end_of_month`, so days 1-5 of every later month fell between buckets; the final partial month or year was never emitted; a yearly read started its first bucket on 1 January even when the window began later, pulling in data from before it; and each bucket closed one *second* early (`end_of_month - 1`). Measured on real data: a third of the samples in such reads was lost. Windows aligned to the period (the usual presets) return what they did, including no bucket for a window ending exactly on a boundary.
 
 ## 0.8.16
