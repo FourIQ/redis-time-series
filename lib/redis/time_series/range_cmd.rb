@@ -286,36 +286,43 @@ class Redis
         # To aggregate per calendar year/month/day we issue one TS.RANGE per bucket and stitch the results back together in PipelineResult#resolve.
 
         def yearly_aggregation(pipeline)
-          calendar_aggregation_loop(pipeline, initial_start: start_time.beginning_of_year, advance_by: :years, &:end_of_year)
+          calendar_aggregation_loop(pipeline) { |t| t.beginning_of_year.advance(years: 1) }
         end
 
         def monthly_aggregation(pipeline)
-          calendar_aggregation_loop(pipeline, initial_start: start_time, advance_by: :months, &:end_of_month)
+          calendar_aggregation_loop(pipeline) { |t| t.beginning_of_month.advance(months: 1) }
         end
 
-        # Generic per-calendar-period loop. The block returns this period's end-Time given the period's start; the caller supplies the very first start. Each iteration narrows @start_time/@end_time to the period, sets @aggregation to that period's exact duration, dispatches through enqueue_window, and pushes one queried_timestamps entry per command actually emitted (so qts.size == result.size when the post-processor needs to NaN-inject empty buckets).
+        # One bucket per calendar period the window touches, clipped to the window at both ends; the
+        # block returns the start of the period after the one a time falls in. Each bucket goes out as
+        # its own command, at its own exact length, and pushes one queried_timestamps entry per command
+        # emitted (so qts.size == result.size when the post-processor NaN-injects an empty period).
+        #
+        # A window ending exactly on a boundary (to 1 April 00:00) gets no bucket for that instant.
         #
         # Requires `pipeline` to be a CountingPipeline — see enqueue.
-        def calendar_aggregation_loop(pipeline, initial_start:, advance_by:)
+        def calendar_aggregation_loop(pipeline)
           # `end_time`, not @end_time: Time#<=> hands a millisecond Integer on to Date#<=>, which
           # reads it as a Julian day number — a date the cursor never reaches, and the loop spins.
           window_end = end_time
+          window_end_ms = msec(window_end)
           queried_timestamps = []
 
           preserving_state do
-            current_start = initial_start
-            current_end = (yield current_start) - 1
-            while current_end < window_end
-              self.aggregation = [@aggregation.type, ((current_end - current_start).round) * 1000]
-              @start_time = current_start
-              @end_time = current_end
+            current = start_time
+            while current < window_end
+              next_start = yield current
+              from_ms = msec(current)
+              to_ms = [msec(next_start) - 1, window_end_ms].min
+              self.aggregation = [@aggregation.type, to_ms - from_ms + 1]
+              @start_time = from_ms
+              @end_time = to_ms
 
               before = @slot_plan.size
               enqueue_window(pipeline)
-              (@slot_plan.size - before).times { queried_timestamps << current_start.to_i * 1000 }
+              (@slot_plan.size - before).times { queried_timestamps << from_ms }
 
-              current_start = current_start.advance(advance_by => 1)
-              current_end = (yield current_start) - 1
+              current = next_start
             end
           end
 
