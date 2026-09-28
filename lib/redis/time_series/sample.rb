@@ -14,7 +14,9 @@ class Redis
       # @see TimeSeries#get
       # @see TimeSeries#range
       def initialize(timestamp, value)
-        @ts_msec = timestamp
+        # A plain Integer: Samples.merge keys a Hash on ts_msec, and an ActiveSupport::Duration (what
+        # `(a..b).step(1.hour)` yields) equals the same Integer but is never eql? to it.
+        @ts_msec = timestamp.respond_to?(:to_int) ? timestamp.to_int : timestamp
         # RESP3 sends a value as a Float, which BigDecimal before 4.0 refuses without a precision; its
         # shortest string is exactly the text RESP2 sends.
         @value = BigDecimal(value.is_a?(Float) ? value.to_s : value)

@@ -50,6 +50,15 @@ RSpec.describe Redis::TimeSeries::Samples do
     let(:merged_samples) { described_class.merge(sample_sets: [samples1, samples2]) }
 
     describe ".merge" do
+      it "pairs a Duration-stamped sample with the Integer-stamped one at the same moment under :keep_equal" do
+        prices = described_class.new((1_735_686_000..1_735_689_600).step(1.hour).map { |t| Redis::TimeSeries::Sample.new(t * 1000, 2) })
+        usage = described_class.new([1_735_686_000, 1_735_689_600].map { |t| Redis::TimeSeries::Sample.new(t * 1000, 3) })
+
+        merged = described_class.merge(sample_sets: [usage, prices], merge_strategy: :keep_equal)
+
+        expect(merged.map(&:ts_msec)).to eq([1_735_686_000_000, 1_735_689_600_000])
+      end
+
       context "with default merge_strategy: :keep_all" do
         it "merges multiple arrays of samples to one array" do
           result = described_class.merge(sample_sets: [samples1, samples2])
