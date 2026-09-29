@@ -96,6 +96,58 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
       .to eq(forward.map { |sample| [sample.ts_msec, sample.value] }.reverse)
   end
 
+  context "with opening-hours windows inside a daily bucket" do
+    def opening_hours(*days, from: "08:00", to: "17:00")
+      days.map { |day| Time.parse("2025-10-#{day} #{from}")..Time.parse("2025-10-#{day} #{to}") }
+    end
+
+    def enqueue(cmd)
+      handle = nil
+      Redis::TimeSeries.redis.with { |conn| conn.pipelined { |pipeline| handle = cmd.enqueue(pipeline) } }
+      handle
+    end
+
+    def daily(windows, aggregation: "count", filter_by_value: nil)
+      cmd = described_class.new(timeseries: ts, start_time: Time.parse("2025-10-01"), end_time: Time.parse("2025-10-20"))
+      cmd.aggregation = [aggregation, 86_400_000]
+      cmd.filter_by_range = windows
+      cmd.filter_by_value = filter_by_value if filter_by_value
+      cmd
+    end
+
+    # 261 windows a year was 783 commands per point; the report sent 300k for one column.
+    it "sends one command per window, without probes" do
+      handle = enqueue(daily(opening_hours(2, 3, 6)))
+
+      expect(handle.command_count).to eq(3)
+      expect(handle.data_command_count).to eq(3)
+    end
+
+    it "counts each window's own samples" do
+      expect(daily(opening_hours(2, 3, 6)).cmd.map { |sample| sample.value.to_i }).to eq([10, 10, 10])
+    end
+
+    # Without EMPTY there is no 8.10 filler to trim: a window with no samples yields no bucket, not a 0.
+    it "returns no bucket for a window with no samples" do
+      expect(labels(daily(opening_hours(2, 15)).cmd)).to eq(["10-02 00:00"])
+    end
+
+    it "returns no bucket for a window the value filter empties" do
+      result = daily(opening_hours(2, 6), filter_by_value: [0, 50]).cmd
+
+      expect(labels(result)).to eq(["10-02 00:00"])
+    end
+
+    it "keeps the probes for a window that spans more than one bucket" do
+      cmd = daily(opening_hours(2))
+      cmd.aggregation = ["count", 3_600_000]
+
+      handle = enqueue(cmd)
+      expect(handle.command_count).to eq(3)
+      expect(cmd.cmd.size).to eq(10)
+    end
+  end
+
   # `twa` interpolates across bucket edges, so it is left as Redis returns it.
   it "sends no probes for twa" do
     cmd = described_class.new(timeseries: ts, start_time: Time.parse("2025-10-02 14:37"),

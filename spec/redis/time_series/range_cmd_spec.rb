@@ -387,7 +387,8 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         range_cmd.enqueue(pipeline)
 
         expect(pipeline.data_commands).to eq(5)
-        expect(pipeline.probes).to eq(10)
+        # Only the three stretches: a transition day is a single bucket and needs none.
+        expect(pipeline.probes).to eq(6)
       end
 
       # Each of the four below is a zone or a window the walker used to get wrong; all reproduced
@@ -704,6 +705,8 @@ RSpec.describe Redis::TimeSeries::RangeCmd do
         end
       end
       expect(handle.data_command_count).to eq(3)
+      # Each month is its own single bucket, so it carries no probes.
+      expect(handle.command_count).to eq(3)
       expect(handle.queried_timestamps.size).to eq(3)
     end
   end
