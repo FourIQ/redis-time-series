@@ -383,8 +383,10 @@ class Redis
         # last sample of its own window under its own filters, and resolve trims to the buckets
         # between them. `twa` is left alone: it interpolates across bucket edges by design.
         def emit(pipeline)
-          @timeseries.range_cmd(self, pipeline: pipeline)
           grid = bucket_grid
+          return emit_without_empty(pipeline) if grid && single_bucket?(grid)
+
+          @timeseries.range_cmd(self, pipeline: pipeline)
           @slot_plan << grid
           return unless grid
 
@@ -392,6 +394,25 @@ class Redis
           probe = [*window_args, "COUNT", 1]
           @timeseries.send(:cmd, "TS.RANGE", @timeseries.key, probe, pipeline: pipeline)
           @timeseries.send(:cmd, "TS.REVRANGE", @timeseries.key, probe, pipeline: pipeline)
+        end
+
+        # A window inside one bucket has no empty bucket for EMPTY to fill but its own, which the
+        # probes would trim again, so it goes without both: one command instead of three. That is
+        # a daytime opening-hours window of a daily read and every calendar period of a monthly one.
+        def emit_without_empty(pipeline)
+          empty = @empty
+          @empty = false
+          @timeseries.range_cmd(self, pipeline: pipeline)
+          @slot_plan << nil
+        ensure
+          @empty = empty
+        end
+
+        def single_bucket?(grid)
+          return false if @start_time.is_a?(String) || @end_time.is_a?(String)
+
+          from = (msec(@start_time) - grid[:origin]).div(grid[:duration])
+          from == (msec(@end_time) - grid[:origin]).div(grid[:duration])
         end
 
         def bucket_grid

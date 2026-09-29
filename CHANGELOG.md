@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+* A command whose window falls inside one bucket goes out without `EMPTY` and without its two `COUNT 1` probes: there is no empty bucket for `EMPTY` to fill but its own, which the probes trimmed again, so the reply is the same with one command instead of three. That covers every sub-range of a `filter_by_range` read shorter than its bucket (an opening-hours daily read: 783 commands a point a year → 261) and every monthly/yearly calendar bucket; `PipelineResult#command_count` drops accordingly.
 * `Sample#ts_msec` is a plain Integer for any timestamp that responds to `to_int` (Integer, Float, `ActiveSupport::Duration`). A timestamp built as `Integer + Duration`, which is what `(a..b).step(1.hour)` yields, is `==` to the Integer but never `eql?`, so since 0.8.16's merge-on-`ts_msec`, `Samples.merge(:keep_equal)` silently dropped every such sample.
 
 ## 0.8.17
