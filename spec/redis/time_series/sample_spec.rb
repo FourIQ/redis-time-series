@@ -45,6 +45,15 @@ RSpec.describe Redis::TimeSeries::Sample do
     it { is_expected.to eq timestamp }
   end
 
+  describe '#ts_msec' do
+    it "is a plain Integer when built from a Duration, so it can key a Hash" do
+      stamped = described_class.new((1_735_686_000 + 1.hour) * 1000, 1)
+
+      expect(stamped.ts_msec).to be_an(Integer)
+      expect(stamped.ts_msec).to eql(1_735_689_600_000)
+    end
+  end
+
   describe '#to_h' do
     subject { sample.to_h }
 
