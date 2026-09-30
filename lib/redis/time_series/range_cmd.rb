@@ -122,7 +122,18 @@ class Redis
         validate!
         counting_pipeline = CountingPipeline.new(pipeline)
         @slot_plan = []
-        queried_timestamps = route_to_pipeline(counting_pipeline)
+        queried_timestamps =
+          case @aggregation&.duration
+          when YEARLY_DURATION
+            calendar_aggregation_loop(counting_pipeline) { |t| t.beginning_of_year.advance(years: 1) }
+          when MONTHLY_DURATION
+            calendar_aggregation_loop(counting_pipeline) { |t| t.beginning_of_month.advance(months: 1) }
+          when DAILY_DURATION
+            daily_aggregation(counting_pipeline)
+          else
+            enqueue_window(counting_pipeline)
+            []
+          end
         PipelineResult.new(
           command_count: counting_pipeline.count,
           queried_timestamps: queried_timestamps,
@@ -250,25 +261,6 @@ class Redis
       private
         # ─── 6. Routing ─────────────────────────────────────────────────
 
-        def route_to_pipeline(pipeline)
-          return enqueue_calendar_aggregation(pipeline) if calendar_aggregation?
-
-          enqueue_window(pipeline)
-          []
-        end
-
-        def calendar_aggregation?
-          [DAILY_DURATION, MONTHLY_DURATION, YEARLY_DURATION].include?(@aggregation&.duration)
-        end
-
-        def enqueue_calendar_aggregation(pipeline)
-          case @aggregation.duration
-          when YEARLY_DURATION  then yearly_aggregation(pipeline)
-          when MONTHLY_DURATION then monthly_aggregation(pipeline)
-          when DAILY_DURATION   then daily_aggregation(pipeline)
-          end
-        end
-
         # Single window dispatch. Used both for the plain (no calendar) case and per-iteration by daily_aggregation, so each daily window still respects filter_by_ts / filter_by_range slicing.
         def enqueue_window(pipeline)
           if @filter_by_ts
@@ -284,14 +276,6 @@ class Redis
         #
         # Redis TimeSeries aggregations have a fixed bucket *duration*, not a calendar interval.
         # To aggregate per calendar year/month/day we issue one TS.RANGE per bucket and stitch the results back together in PipelineResult#resolve.
-
-        def yearly_aggregation(pipeline)
-          calendar_aggregation_loop(pipeline) { |t| t.beginning_of_year.advance(years: 1) }
-        end
-
-        def monthly_aggregation(pipeline)
-          calendar_aggregation_loop(pipeline) { |t| t.beginning_of_month.advance(months: 1) }
-        end
 
         # One bucket per calendar period the window touches, clipped to the window at both ends; the
         # block returns the start of the period after the one a time falls in. Each bucket goes out as
