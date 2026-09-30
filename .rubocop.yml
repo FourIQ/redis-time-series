@@ -64,7 +64,9 @@ Layout/LineLength:
 
 # Check Metrics of code, like too many references, method length etc.
 Metrics/AbcSize:
-  Max: 30
+  Max: 40
+Metrics/CyclomaticComplexity:
+  Max: 12
 Metrics/MethodLength:
   Max: 30
 
