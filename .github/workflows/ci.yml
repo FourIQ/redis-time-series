@@ -1,0 +1,70 @@
+name: CI
+
+# Self-contained on purpose. Every other FourIQ repo calls the reusable workflow in FourIQ/development,
+# but this repo is public and that one is private, and GitHub does not let a public repo consume a
+# private repo's reusable workflow. The upside: this gem needs no private gems, no sibling checkout and
+# no database, so it needs no secrets either and runs a real suite on its own.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Every server runs Amsterdam; only the UTC leg catches a time built in the wrong zone.
+    strategy:
+      fail-fast: false
+      matrix:
+        tz: ["Europe/Amsterdam", "UTC"]
+
+    services:
+      # Redis 8 bundles the TimeSeries module, so the specs need no separate image. No retention
+      # policy here: a server default would evict samples the aggregation specs write days apart.
+      # Same version as the dev stack: reverse aggregated reads differ on 8.2 and fail a spec there.
+      redis:
+        image: redis:8.10.1
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s --health-timeout=5s --health-retries=30
+
+    env:
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      TZ: ${{ matrix.tz }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4.2"
+
+      - name: bundle install
+        run: bundle install --jobs 4
+
+      - name: rubocop
+        run: |
+          if ! bundle exec rubocop --version >/dev/null 2>&1; then
+            echo "::notice::rubocop is not in this repo's bundle — skipped"
+            exit 0
+          fi
+          bundle exec rubocop --format github --format progress
+
+      # Runs after a red rubocop too, so one run reports both.
+      - name: rspec
+        if: ${{ !cancelled() }}
+        run: bundle exec rspec
