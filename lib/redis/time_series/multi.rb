@@ -11,6 +11,11 @@ class Redis
       # There's no need to ever create one yourself.
       # @api private
       def initialize(result_array)
+        # RESP3 answers with a map, { key => [labels, metadata, samples] }; RESP2 with
+        # [[key, labels, samples]]. labels.to_a turns RESP3's {} into RESP2's [] exactly.
+        if result_array.is_a?(Hash)
+          result_array = result_array.map { |key, (labels, _metadata, samples)| [key, labels.to_a, samples] }
+        end
         super(result_array.map do |res|
           Result.new(
             TimeSeries.new(res[0]),

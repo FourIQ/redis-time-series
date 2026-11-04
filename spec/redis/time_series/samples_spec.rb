@@ -50,6 +50,15 @@ RSpec.describe Redis::TimeSeries::Samples do
     let(:merged_samples) { described_class.merge(sample_sets: [samples1, samples2]) }
 
     describe ".merge" do
+      it "pairs a Duration-stamped sample with the Integer-stamped one at the same moment under :keep_equal" do
+        prices = described_class.new((1_735_686_000..1_735_689_600).step(1.hour).map { |t| Redis::TimeSeries::Sample.new(t * 1000, 2) })
+        usage = described_class.new([1_735_686_000, 1_735_689_600].map { |t| Redis::TimeSeries::Sample.new(t * 1000, 3) })
+
+        merged = described_class.merge(sample_sets: [usage, prices], merge_strategy: :keep_equal)
+
+        expect(merged.map(&:ts_msec)).to eq([1_735_686_000_000, 1_735_689_600_000])
+      end
+
       context "with default merge_strategy: :keep_all" do
         it "merges multiple arrays of samples to one array" do
           result = described_class.merge(sample_sets: [samples1, samples2])
@@ -98,6 +107,12 @@ RSpec.describe Redis::TimeSeries::Samples do
         result = samples.filter_negative_values!
         expect(result.map { |s| s.ts_msec }).to eq([timestamp1, timestamp2])
         expect(result.map { |s| s.value }).to eq([0, 2])
+      end
+
+      # A CalculatedSample takes any value; a blank one must read as zero, not raise on `<= 0`.
+      it "zeroes blank values" do
+        samples = described_class.new([nil, false, [], ""].map { |v| Redis::TimeSeries::CalculatedSample.new(timestamp1, v) })
+        expect(samples.filter_negative_values!.map(&:value)).to eq([0, 0, 0, 0])
       end
     end
 

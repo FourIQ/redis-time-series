@@ -6,6 +6,13 @@ class Redis
     # the parent {TimeSeries} class methods. You can enable or disable debugging, and set
     # a default Redis client to use for time series objects.
     module Client
+      # How an argument goes over the wire: a Time as its milliseconds, floored so a bound never
+      # reaches past what the caller asked for; anything else as its string. RangeCmd reads bounds
+      # back through this to know which timestamp Redis received.
+      def self.wire(arg)
+        arg.is_a?(Time) ? (arg.to_i * 1000) + (arg.nsec / 1_000_000) : arg.to_s
+      end
+
       def self.extended(base)
         base.class_eval do
           attr_accessor(:redis)
@@ -66,7 +73,7 @@ class Redis
         end
 
         def cmd_with_redis(redis, name, *args, pipeline: nil)
-          args = args.flatten.compact.map { |arg| arg.is_a?(Time) ? arg.to_i * 1000 : arg.to_s }
+          args = args.flatten.compact.map { |arg| Client.wire(arg) }
           puts "DEBUG: #{name} #{args.join(' ')}" if debug
           if pipeline
             pipeline.call name, args

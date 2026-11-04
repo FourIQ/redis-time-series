@@ -2,6 +2,6 @@
 
 class Redis
   class TimeSeries
-    VERSION = "0.8.13"
+    VERSION = "0.8.18"
   end
 end

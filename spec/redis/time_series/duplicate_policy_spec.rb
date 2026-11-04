@@ -78,4 +78,12 @@ RSpec.describe Redis::TimeSeries::DuplicatePolicy do
     specify { expect(policy).to be_block }
     specify { expect(policy).not_to be_max }
   end
+
+  it "compares unequal to anything that is not a policy, rather than raising" do
+    policy = described_class.new(:block)
+
+    expect(policy == nil).to be false
+    expect(policy == "nonsense").to be false
+    expect(policy == "BLOCK").to be true
+  end
 end

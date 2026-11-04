@@ -36,7 +36,10 @@ class Redis
 
       def ==(other)
         return policy == other.policy if other.is_a?(self.class)
+
         policy == self.class.new(other).policy
+      rescue UnknownPolicyError
+        false
       end
 
       VALID_POLICIES.each do |policy|

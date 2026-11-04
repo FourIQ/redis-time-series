@@ -3,8 +3,8 @@
 require "spec_helper"
 
 RSpec.describe Redis::TimeSeries::RangeCmd, ".batch" do
-  let(:key1) { "batch_range_test_1" }
-  let(:key2) { "batch_range_test_2" }
+  let(:key1) { spec_key("batch_range_test_1") }
+  let(:key2) { spec_key("batch_range_test_2") }
   let(:ts1) { Redis::TimeSeries.create(key1) }
   let(:ts2) { Redis::TimeSeries.create(key2) }
 
@@ -64,7 +64,7 @@ RSpec.describe Redis::TimeSeries::RangeCmd, ".batch" do
   end
 
   describe "missing series keys" do
-    let(:missing_ts) { Redis::TimeSeries.new("batch_range_test_missing") }
+    let(:missing_ts) { Redis::TimeSeries.new(spec_key("batch_range_test_missing")) }
 
     it "resolves a missing key to empty Samples without poisoning the other slots" do
       timestamp1 = Time.parse("2024-01-01")
@@ -96,12 +96,12 @@ RSpec.describe Redis::TimeSeries::RangeCmd, ".batch" do
     end
 
     it "still raises for errors other than a missing key" do
-      Redis::TimeSeries.redis.with { |conn| conn.set("batch_range_test_missing", "not a timeseries") }
+      Redis::TimeSeries.redis.with { |conn| conn.set(spec_key("batch_range_test_missing"), "not a timeseries") }
       cmd = described_class.new(timeseries: missing_ts, start_time: Time.parse("2024-01-01"), end_time: Time.parse("2024-01-02"))
 
       expect { described_class.batch([cmd]) }.to raise_error(Redis::CommandError)
     ensure
-      Redis::TimeSeries.redis.with { |conn| conn.del("batch_range_test_missing") }
+      Redis::TimeSeries.redis.with { |conn| conn.del(spec_key("batch_range_test_missing")) }
     end
   end
 
