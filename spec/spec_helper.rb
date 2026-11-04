@@ -17,7 +17,7 @@ REDIS_HOST = ENV['REDIS_HOST'] || '127.0.0.1'
 # which errors against a passwordless Redis.
 REDIS_PASSWORD = ENV['REDIS_PASSWORD'].to_s.empty? ? nil : ENV['REDIS_PASSWORD']
 
-# DST behaviour can only be exercised in a zone that observes it, and CI runs UTC.
+# DST behaviour can only be exercised in a zone that observes it, and one CI leg runs UTC.
 module ZoneHelpers
   def in_zone(zone)
     original = ENV["TZ"]
